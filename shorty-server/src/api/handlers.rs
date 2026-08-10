@@ -1,6 +1,7 @@
-//! Handlers — обычные async-функции; extractors в аргументах,
-//! `Result<_, AppError>` на выходе. Про HTTP-коды ошибок handlers
-//! не знают: это забота `AppError::into_response`.
+//! Обработчики HTTP запросов.
+//!
+//! Каждый handler отвечает за конкретный endpoint и
+//! делегирует логику в доменный слой через хранилище.
 
 use std::time::{Duration, SystemTime};
 
@@ -23,11 +24,19 @@ use super::{
 use crate::AppState;
 
 // ---------------------------------------------------------------------------
-// CRUD ссылок
+// CRUD операции со ссылками
 // ---------------------------------------------------------------------------
 
-/// `POST /api/v1/links` — создать ссылку.
-/// `201` + `Location` + тело; `422` при невалидных данных; `409` если код занят.
+/// Создание новой короткой ссылки.
+///
+/// Если `custom_code` не указан, генерируется автоматически.
+/// При указании `ttl_seconds` ссылка будет автоматически удалена
+/// фоновым процессом после истечения срока.
+///
+/// # Ошибки
+/// - 409 - код уже занят
+/// - 422 - невалидный URL или код
+/// - 429 - превышен rate limit
 pub async fn create_link(
     State(state): State<AppState>,
     AppJson(req): AppJson<CreateLinkRequest>,
@@ -38,9 +47,6 @@ pub async fn create_link(
     let code = match req.custom_code {
         Some(code) => {
             validate_custom_code(&code)?;
-            // Проверка занятости и вставка — одна атомарная операция
-            // репозитория (никакого contains + insert: между ними
-            // параллельный запрос успел бы занять код — check-then-act).
             insert_link(&state, &code, target_url.as_str(), expires_at).await?;
             code
         }
@@ -55,7 +61,9 @@ pub async fn create_link(
     ))
 }
 
-/// `GET /api/v1/links/{code}` — метаданные ссылки и счётчик переходов.
+/// Получение метаданных ссылки.
+///
+/// Возвращает информацию о ссылке включая количество переходов.
 pub async fn get_link(
     State(state): State<AppState>,
     Path(code): Path<String>,
@@ -64,15 +72,15 @@ pub async fn get_link(
     Ok(Json(stats.into()))
 }
 
-/// `GET /{code}` — redirect, hot path сервиса (урок 2).
-/// `307` + `Location`, счётчик инкрементируется атомарно.
+/// Редирект по короткому коду.
+///
+/// Автоматически инкрементирует счетчик переходов.
+/// Возвращает 307 Temporary Redirect для сохранения метода запроса.
 pub async fn redirect(
     State(state): State<AppState>,
     Path(code): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
     let link = state.repo.get(&code).await?;
-    // Протухшая, но ещё не убранная уборщиком ссылка снаружи
-    // неотличима от отсутствующей.
     if link.is_expired(SystemTime::now()) {
         return Err(AppError::NotFound);
     }
@@ -83,12 +91,11 @@ pub async fn redirect(
     ))
 }
 
-/// `DELETE /api/v1/links/{code}` — удаление, `204 No Content`.
+/// Удаление ссылки.
 ///
-/// DELETE несуществующего кода: выбираем информативность — `404`
-/// (идемпотентность результата от этого не страдает: ресурса нет в обоих
-/// случаях). Решение зафиксировано здесь и в тестах; в уроке 10 оно
-/// попадёт в OpenAPI-контракт.
+/// # Контракт
+/// - 204 - успешное удаление
+/// - 404 - ссылка не найдена
 pub async fn delete_link(
     State(state): State<AppState>,
     Path(code): Path<String>,
@@ -97,19 +104,19 @@ pub async fn delete_link(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Fallback для неизвестных путей: 404 в едином формате ошибок,
-/// а не пустое тело по умолчанию.
+/// Обработчик для неизвестных путей.
+/// Возвращает 404 в едином формате ошибок.
 pub async fn fallback_404() -> AppError {
     AppError::NotFound
 }
 
 // ---------------------------------------------------------------------------
-// Вспомогательное: генерация кода
+// Вспомогательные функции
 // ---------------------------------------------------------------------------
 
-/// Генерация кода с повтором при коллизии. Каждая попытка — атомарный
-/// `insert`; вероятность коллизии nanoid при длине 8 ничтожна, но retry
-/// делает поведение корректным, а не «почти всегда корректным».
+/// Генерация уникального кода с повторными попытками.
+///
+/// Использует атомарную операцию вставки для проверки занятости.
 async fn generate_code(
     state: &AppState,
     target_url: &str,
@@ -129,6 +136,7 @@ async fn generate_code(
     )))
 }
 
+/// Атомарная вставка ссылки с проверкой занятости кода.
 async fn insert_link(
     state: &AppState,
     code: &str,
@@ -140,6 +148,7 @@ async fn insert_link(
         .map_err(Into::into)
 }
 
+/// Внутренняя функция атомарной вставки.
 async fn try_insert_link(
     state: &AppState,
     code: &str,
@@ -154,7 +163,7 @@ async fn try_insert_link(
 }
 
 // ---------------------------------------------------------------------------
-// Технические маршруты (уроки 1 и 3)
+// Технические эндпоинты
 // ---------------------------------------------------------------------------
 
 #[derive(Serialize)]
@@ -167,17 +176,19 @@ pub struct Version {
     version: &'static str,
 }
 
+/// Проверка работоспособности сервиса.
 pub async fn healthz() -> Json<Health> {
     Json(Health { status: "ok" })
 }
 
+/// Версия сервиса из Cargo.toml.
 pub async fn version() -> Json<Version> {
     Json(Version {
         version: env!("CARGO_PKG_VERSION"),
     })
 }
 
-/// ПРАВИЛЬНО: блокирующая работа — в blocking-пуле (урок 3).
+/// Демонстрация корректной обработки блокирующих операций.
 pub async fn slow() -> &'static str {
     tokio::task::spawn_blocking(|| {
         std::thread::sleep(Duration::from_secs(2));
@@ -187,8 +198,8 @@ pub async fn slow() -> &'static str {
     "done: spawn_blocking kept workers free\n"
 }
 
-/// НАМЕРЕННО СЛОМАНО (демонстрация урока 3): синхронный sleep
-/// монополизирует worker-поток. См. README.
+/// Демонстрация НЕПРАВИЛЬНОЙ обработки блокирующих операций.
+/// Этот метод блокирует поток выполнения и не должен использоваться в продакшене.
 pub async fn slow_blocking() -> &'static str {
     std::thread::sleep(Duration::from_secs(2));
     "done: but a worker thread was blocked for 2s!\n"

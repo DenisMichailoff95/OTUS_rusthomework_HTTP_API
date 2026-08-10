@@ -1,8 +1,4 @@
-//! Фоновая задача-«уборщик» протухших ссылок (урок 3).
-//!
-//! Канон graceful shutdown: `CancellationToken` (сигнал «пора
-//! завершаться») + `TaskTracker` (дожидание всех фоновых задач) +
-//! `select!` в цикле задачи.
+//! Фоновая задача-«уборщик» протухших ссылок.
 
 use std::{
     sync::Arc,
@@ -24,12 +20,9 @@ pub fn spawn_cleaner(
 
 async fn run_cleaner(repo: Arc<dyn LinkRepository>, period: Duration, token: CancellationToken) {
     let mut interval = tokio::time::interval(period);
-    // Если тик пропущен (сервис был занят) — не навёрстываем очередь тиков.
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
-        // `select!` гоняет две futures; обе ветки cancellation-safe:
-        // `cancelled()` и `tick()` можно безопасно пересоздавать.
         tokio::select! {
             _ = token.cancelled() => {
                 tracing::info!("cleaner: cancellation requested, exiting");
@@ -49,25 +42,25 @@ async fn run_cleaner(repo: Arc<dyn LinkRepository>, period: Duration, token: Can
 
 #[cfg(test)]
 mod tests {
-    use domain::ShortLink;
+    use domain::{LinkRepository, ShortLink};
     use storage::InMemoryRepo;
 
     use super::*;
 
-    /// Тест таймерной логики на **виртуальном времени** tokio:
-    /// `start_paused = true` останавливает часы, а `sleep` внутри теста
-    /// мгновенно «проматывает» их до ближайшего таймера (auto-advance) —
-    /// секунды ожидания не тратятся.
     #[tokio::test(start_paused = true)]
     async fn cleaner_purges_expired_links() {
         let repo = Arc::new(InMemoryRepo::new());
-        // Ссылка с expires_at в прошлом — кандидат на удаление.
+
+        // Используем асинхронные методы через трейт
         repo.insert(
             ShortLink::new("old", "https://example.com/old")
                 .with_expires_at(SystemTime::now() - Duration::from_secs(3600)),
         )
+        .await
         .unwrap();
+
         repo.insert(ShortLink::new("fresh", "https://example.com/fresh"))
+            .await
             .unwrap();
 
         let token = CancellationToken::new();
@@ -79,13 +72,15 @@ mod tests {
             token.clone(),
         );
 
-        // Проматываем виртуальное время за первый тик интервала.
         tokio::time::sleep(Duration::from_secs(31)).await;
 
-        assert!(repo.get("old").is_err(), "expired link must be purged");
-        assert!(repo.get("fresh").is_ok(), "live link must survive");
+        // Асинхронная проверка
+        let old_result = repo.get("old").await;
+        assert!(old_result.is_err(), "expired link must be purged");
 
-        // Корректное завершение: cancel + дожидание задачи с таймаутом.
+        let fresh_result = repo.get("fresh").await;
+        assert!(fresh_result.is_ok(), "live link must survive");
+
         token.cancel();
         tracker.close();
         tokio::time::timeout(Duration::from_secs(5), tracker.wait())

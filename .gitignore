@@ -1,0 +1,89 @@
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+*.exp
+*.ilk
+*.lib
+*.so
+*.dylib
+*.dll
+*.a
+*.o
+*.prof
+*.gcda
+*.gcno
+*.profraw
+
+# Cargo
+Cargo.lock
+/crates/*/Cargo.lock
+/shorty-server/Cargo.lock
+
+# IDE
+/.idea/
+/.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+*.iml
+
+# OS
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+*.log.*
+/logs/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Debug
+*.pdb
+*.dSYM
+
+# Coverage
+*.gcov
+/target/coverage/
+/target/debug/coverage/
+
+# Benchmarks
+/target/criterion/
+
+# Temporary files
+*.tmp
+*.temp
+/tmp/
+
+# Backup files
+*.bak
+*.backup
+
+# Archives
+*.zip
+*.tar.gz
+*.tgz
+*.rar
+*.7z
+
+# CI/CD
+/.github/
+*.pem
+*.key
+*.crt
+
+# Build output
+/build/
+/dist/
+
+# Test output
+/test-results/
+
+# Editor directories
+.cursor/
+.zed/
