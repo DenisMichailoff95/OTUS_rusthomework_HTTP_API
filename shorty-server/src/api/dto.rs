@@ -1,8 +1,4 @@
 //! DTO — wire-формат API.
-//!
-//! `serde`-атрибуты определяют контракт: `deny_unknown_fields` на входных
-//! типах ловит опечатки клиента (и случайное изменение контракта при
-//! рефакторинге), `rename_all` фиксирует стиль имён явно.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -50,9 +46,7 @@ fn unix_secs(t: SystemTime) -> u64 {
     t.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
 }
 
-/// «Parse, don't validate»: не проверяем строку, а превращаем её в `Url`,
-/// который не может быть невалидным. Дальше границы API строка-«сырец»
-/// не проходит.
+/// «Parse, don't validate»: не проверяем строку, а превращаем её в `Url`.
 pub fn parse_target_url(raw: &str) -> Result<Url, AppError> {
     let url =
         Url::parse(raw).map_err(|e| AppError::Validation(format!("invalid target_url: {e}")))?;
@@ -84,11 +78,15 @@ pub fn validate_custom_code(code: &str) -> Result<(), AppError> {
 }
 
 /// TTL → абсолютный момент истечения.
+/// TTL должен быть >= 60 секунд (минимальное значение).
 pub fn expires_at_from_ttl(ttl_seconds: Option<u64>) -> Result<Option<SystemTime>, AppError> {
     match ttl_seconds {
         None => Ok(None),
         Some(0) => Err(AppError::Validation(
             "ttl_seconds must be greater than zero".to_string(),
+        )),
+        Some(secs) if secs < 60 => Err(AppError::Validation(
+            "ttl_seconds must be at least 60 seconds".to_string(),
         )),
         Some(secs) => Ok(Some(SystemTime::now() + Duration::from_secs(secs))),
     }

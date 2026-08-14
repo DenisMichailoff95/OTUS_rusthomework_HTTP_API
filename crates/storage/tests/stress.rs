@@ -1,22 +1,16 @@
-//! Stress-тесты на корректность конкурентного счётчика переходов (урок 2).
+//! Stress-тесты на корректность конкурентного счётчика переходов.
 //!
 //! 8 потоков по 10 000 инкрементов в одну ссылку: у корректных
 //! реализаций итог ровно 80 000. Намеренно сломанная версия
-//! (read-modify-write с разлочкой между чтением и записью)
-//! теряет обновления — это отдельный демонстрационный тест.
-//!
-//! Тесты работают с синхронным ядром хранилищ (инхерентные методы),
-//! поэтому runtime tokio им не нужен.
+//! теряет обновления.
 
-use domain::ShortLink;
+use domain::{LinkRepository, ShortLink};
 use storage::{DashMapRepo, InMemoryRepo, InMemoryRepoV1, broken::LostUpdateRepo};
 
 const THREADS: usize = 8;
 const HITS_PER_THREAD: usize = 10_000;
 const TOTAL: u64 = (THREADS * HITS_PER_THREAD) as u64;
 
-/// Запускает 8 потоков по 10 000 операций `hit` и возвращает управление,
-/// когда все завершились.
 fn hammer(hit: impl Fn() + Sync) {
     std::thread::scope(|s| {
         for _ in 0..THREADS {
@@ -29,9 +23,9 @@ fn hammer(hit: impl Fn() + Sync) {
     });
 }
 
+/// Синхронные тесты для v1 (только синхронный API)
 #[test]
 fn v1_no_lost_updates() {
-    // v1 корректна (инкремент под write-lock), просто медленна на hot path.
     let repo = InMemoryRepoV1::new();
     repo.insert(ShortLink::new("hot", "https://example.com/"))
         .unwrap();
@@ -41,35 +35,67 @@ fn v1_no_lost_updates() {
     assert_eq!(repo.stats("hot").unwrap().hits, TOTAL);
 }
 
-#[test]
-fn v2_no_lost_updates() {
-    // v2: read-lock + AtomicU64 — корректно и без write-lock.
+/// Асинхронные тесты для v2 через трейт
+#[tokio::test]
+async fn v2_no_lost_updates_async() {
     let repo = InMemoryRepo::new();
     repo.insert(ShortLink::new("hot", "https://example.com/"))
+        .await
         .unwrap();
-    hammer(|| {
-        repo.record_hit("hot").unwrap();
-    });
-    assert_eq!(repo.stats("hot").unwrap().hits, TOTAL);
+
+    // Используем Arc для разделения между задачами
+    let repo = std::sync::Arc::new(repo);
+    let mut handles = Vec::new();
+
+    for _ in 0..THREADS {
+        let repo = repo.clone();
+        let code = "hot".to_string();
+        handles.push(tokio::spawn(async move {
+            for _ in 0..HITS_PER_THREAD {
+                // Явно указываем тип для трейта
+                let _ = LinkRepository::record_hit(&*repo, &code).await.unwrap();
+            }
+        }));
+    }
+
+    for handle in handles {
+        handle.await.unwrap();
+    }
+
+    let stats = LinkRepository::stats(&*repo, "hot").await.unwrap();
+    assert_eq!(stats.hits, TOTAL);
 }
 
-#[test]
-fn dashmap_no_lost_updates() {
+/// DashMap асинхронный тест
+#[tokio::test]
+async fn dashmap_no_lost_updates_async() {
     let repo = DashMapRepo::new();
     repo.insert(ShortLink::new("hot", "https://example.com/"))
+        .await
         .unwrap();
-    hammer(|| {
-        repo.record_hit("hot").unwrap();
-    });
-    assert_eq!(repo.stats("hot").unwrap().hits, TOTAL);
+
+    let repo = std::sync::Arc::new(repo);
+    let mut handles = Vec::new();
+
+    for _ in 0..THREADS {
+        let repo = repo.clone();
+        let code = "hot".to_string();
+        handles.push(tokio::spawn(async move {
+            for _ in 0..HITS_PER_THREAD {
+                let _ = LinkRepository::record_hit(&*repo, &code).await.unwrap();
+            }
+        }));
+    }
+
+    for handle in handles {
+        handle.await.unwrap();
+    }
+
+    let stats = LinkRepository::stats(&*repo, "hot").await.unwrap();
+    assert_eq!(stats.hits, TOTAL);
 }
 
-/// Демонстрация: сломанная версия теряет обновления.
-///
-/// Итог недетерминирован (зависит от interleaving планировщика), поэтому
-/// жёсткое `assert_eq!(hits, TOTAL)` здесь превратилось бы в flaky-тест.
-/// Проверяем инвариант `hits <= TOTAL` и печатаем, сколько потеряно —
-/// на практике почти всегда теряются десятки процентов инкрементов.
+/// Тест сломанной версии (синхронный, для демонстрации)
 #[test]
 fn broken_repo_loses_updates() {
     let repo = LostUpdateRepo::new();
@@ -84,4 +110,36 @@ fn broken_repo_loses_updates() {
         "broken repo: {hits} of {TOTAL} hits recorded, lost {}",
         TOTAL - hits
     );
+}
+
+/// Асинхронный конкурентный тест для InMemoryRepo с большим числом запросов
+#[tokio::test(flavor = "multi_thread")]
+async fn async_concurrent_heavy_load() {
+    let repo = InMemoryRepo::new();
+    repo.insert(ShortLink::new("heavy", "https://example.com/"))
+        .await
+        .unwrap();
+
+    let repo = std::sync::Arc::new(repo);
+    let tasks = 10;
+    let hits_per_task = 100_000;
+    let expected_total = (tasks * hits_per_task) as u64;
+
+    let mut handles = Vec::new();
+    for _ in 0..tasks {
+        let repo = repo.clone();
+        let code = "heavy".to_string();
+        handles.push(tokio::spawn(async move {
+            for _ in 0..hits_per_task {
+                let _ = LinkRepository::record_hit(&*repo, &code).await.unwrap();
+            }
+        }));
+    }
+
+    for handle in handles {
+        handle.await.unwrap();
+    }
+
+    let stats = LinkRepository::stats(&*repo, "heavy").await.unwrap();
+    assert_eq!(stats.hits, expected_total);
 }

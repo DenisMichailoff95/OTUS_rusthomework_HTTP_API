@@ -1,0 +1,80 @@
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+*.exp
+*.ilk
+*.lib
+*.so
+*.dylib
+*.dll
+*.a
+*.o
+*.prof
+*.gcda
+*.gcno
+*.profraw
+
+# Cargo
+Cargo.lock
+
+# IDE
+/.idea/
+/.vscode/
+.cursor/
+.zed/
+*.swp
+*.swo
+*~
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+/logs/
+
+# Coverage
+/target/coverage/
+/target/debug/coverage/
+*.gcov
+
+# Benchmarks
+/target/criterion/
+
+# Temporary files
+*.tmp
+/tmp/
+
+# Backup files
+*.bak
+*.backup
+
+# Archives
+*.zip
+*.tar.gz
+*.tgz
+*.rar
+*.7z
+
+# Keys and certificates
+*.pem
+*.key
+*.crt
+
+# Build output
+/build/
+/dist/
+
+# Test output
+/test-results/
+
+# GitHub Actions (всегда коммитить workflows)

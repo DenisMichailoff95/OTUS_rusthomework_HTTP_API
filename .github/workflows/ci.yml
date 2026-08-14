@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: cargo-registry-${{ hashFiles('**/Cargo.toml') }}
+      - name: Cache cargo index
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: cargo-index-${{ hashFiles('**/Cargo.toml') }}
+      - name: Cache target dir
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: target-${{ hashFiles('**/Cargo.toml') }}
+      - name: Check formatting
+        run: cargo fmt -- --check
+      - name: Check workspace
+        run: cargo check --workspace
+      - name: Run tests
+        run: cargo test --workspace
+      - name: Run clippy
+        run: cargo clippy --workspace -- -D warnings
