@@ -1,16 +1,12 @@
 //! Тесты HTTP-слоя без реального сокета.
 
-use std::{
-    sync::Arc,
-    time::{Duration, SystemTime},
-};
+use std::sync::Arc;
 
 use axum::{
     Router,
     body::Body,
     http::{Request, Response, StatusCode, header},
 };
-use domain::{LinkRepository, ShortLink};
 use http_body_util::BodyExt;
 use serde::de::DeserializeOwned;
 use shorty_server::{
