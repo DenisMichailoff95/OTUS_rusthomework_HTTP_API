@@ -73,10 +73,7 @@ pub fn build_router(state: AppState) -> Router {
             "/links/{code}",
             get(api::handlers::get_link).delete(api::handlers::delete_link),
         )
-        .route(
-            "/links/{code}/stats",
-            get(api::stats::get_link_stats),
-        )
+        .route("/links/{code}/stats", get(api::stats::get_link_stats))
         .layer(axum::middleware::from_fn_with_state(
             rate_limit_state.clone(),
             rate_limit_middleware,

@@ -37,25 +37,27 @@ async fn shutdown_signal() {
 
 fn load_config() -> Config {
     let mut config = Config::default();
-    
+
     if let Ok(val) = std::env::var("CODE_LENGTH") {
         config.code_length = val.parse().expect("CODE_LENGTH must be a number");
     }
-    
+
     if let Ok(val) = std::env::var("RATE_LIMIT_CAPACITY") {
         config.rate_limit_capacity = val.parse().expect("RATE_LIMIT_CAPACITY must be a number");
     }
-    
+
     if let Ok(val) = std::env::var("RATE_LIMIT_PERIOD_SECS") {
-        config.rate_limit_period_secs = val.parse().expect("RATE_LIMIT_PERIOD_SECS must be a number");
+        config.rate_limit_period_secs = val
+            .parse()
+            .expect("RATE_LIMIT_PERIOD_SECS must be a number");
     }
-    
+
     // CLEANUP_INTERVAL_SECS - пока используем константу, но переменная доступна
     if let Ok(_val) = std::env::var("CLEANUP_INTERVAL_SECS") {
         // Для простоты оставим как есть, но можно использовать для переопределения
         // В будущем можно добавить: config.cleanup_interval = _val.parse()...
     }
-    
+
     config
 }
 
@@ -68,7 +70,7 @@ async fn run() {
     let config = Arc::new(load_config());
     let repo: Arc<dyn LinkRepository> = Arc::new(InMemoryRepo::new());
     let stats_storage = Arc::new(domain::stats::StatsStorage::new());
-    
+
     let state = AppState {
         repo: repo.clone(),
         stats_storage: stats_storage.clone(),
@@ -80,7 +82,10 @@ async fn run() {
     cleanup::spawn_cleaner(repo, CLEANUP_PERIOD, &tracker, shutdown_token.clone());
 
     tracing::info!(%addr, "shorty server listening");
-    tracing::info!(rate_limit_capacity = config.rate_limit_capacity, "rate limiter configured");
+    tracing::info!(
+        rate_limit_capacity = config.rate_limit_capacity,
+        "rate limiter configured"
+    );
 
     axum::serve(listener, build_router(state))
         .with_graceful_shutdown(shutdown_signal())

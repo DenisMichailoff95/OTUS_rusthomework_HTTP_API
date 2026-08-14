@@ -38,7 +38,7 @@ impl SlidingWindowStats {
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        
+
         // Если прошло больше 60 секунд с последнего обновления,
         // нужно очистить буфер
         if now_sec > self.last_update_sec + 60 {
@@ -52,7 +52,7 @@ impl SlidingWindowStats {
                 self.buffer[idx] = 0;
             }
         }
-        
+
         let idx = (now_sec % 60) as usize;
         self.buffer[idx] += 1;
         self.cached_sum += 1;
@@ -128,18 +128,18 @@ mod tests {
     fn test_sliding_window() {
         let mut stats = SlidingWindowStats::new();
         let base = SystemTime::UNIX_EPOCH + Duration::from_secs(1000);
-        
+
         // Добавляем хиты в секунды 10, 20, 30
         stats.record_hit(base + Duration::from_secs(10));
         stats.record_hit(base + Duration::from_secs(20));
         stats.record_hit(base + Duration::from_secs(30));
-        
+
         assert_eq!(stats.get_last_60s(), 3);
         assert_eq!(stats.get_total(), 3);
-        
+
         // Добавляем хит в секунду 70 (прошло больше 60 секунд от первого)
         stats.record_hit(base + Duration::from_secs(70));
-        
+
         // Должно остаться только 2 хита (на 20 и 30 секундах)
         // + новый на 70
         assert_eq!(stats.get_last_60s(), 3);
@@ -149,20 +149,20 @@ mod tests {
     #[test]
     fn test_stats_storage_top() {
         let storage = StatsStorage::new();
-        
+
         // Создаём статистику для нескольких ссылок
         let stats1 = storage.get_or_create("a");
         stats1.write().unwrap().record_hit(SystemTime::now());
         stats1.write().unwrap().record_hit(SystemTime::now());
-        
+
         let stats2 = storage.get_or_create("b");
         stats2.write().unwrap().record_hit(SystemTime::now());
-        
+
         let stats3 = storage.get_or_create("c");
         stats3.write().unwrap().record_hit(SystemTime::now());
         stats3.write().unwrap().record_hit(SystemTime::now());
         stats3.write().unwrap().record_hit(SystemTime::now());
-        
+
         let top = storage.get_top(2);
         assert_eq!(top.len(), 2);
         assert_eq!(top[0].0, "c");
