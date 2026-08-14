@@ -85,19 +85,18 @@ pub async fn rate_limit_middleware(
 /// 4. "unknown" (fallback)
 fn get_client_id(req: &Request) -> String {
     // Пробуем X-Api-Key - предпочтительный способ
-    if let Some(api_key) = req.headers().get("x-api-key") {
-        if let Ok(key) = api_key.to_str() {
-            return format!("api-key:{}", key);
-        }
+    if let Some(api_key) = req.headers().get("x-api-key")
+        && let Ok(key) = api_key.to_str()
+    {
+        return format!("api-key:{}", key);
     }
 
     // Пробуем X-Forwarded-For для прокси/CDN
-    if let Some(forwarded) = req.headers().get("x-forwarded-for") {
-        if let Ok(ips) = forwarded.to_str() {
-            if let Some(ip) = ips.split(',').next() {
-                return format!("ip:{}", ip.trim());
-            }
-        }
+    if let Some(forwarded) = req.headers().get("x-forwarded-for")
+        && let Ok(ips) = forwarded.to_str()
+        && let Some(ip) = ips.split(',').next()
+    {
+        return format!("ip:{}", ip.trim());
     }
 
     // Пробуем Remote-Addr для прямых подключений

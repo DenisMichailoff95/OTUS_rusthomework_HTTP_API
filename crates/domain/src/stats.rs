@@ -5,6 +5,7 @@
 //! окно - 60 секунд.
 
 use std::{
+    cmp::Reverse,
     collections::HashMap,
     sync::{Arc, RwLock},
     time::SystemTime,
@@ -72,6 +73,12 @@ impl SlidingWindowStats {
     }
 }
 
+impl Default for SlidingWindowStats {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Хранилище статистики для всех ссылок.
 #[derive(Default)]
 pub struct StatsStorage {
@@ -113,7 +120,7 @@ impl StatsStorage {
                 (code.clone(), total)
             })
             .collect();
-        entries.sort_by(|a, b| b.1.cmp(&a.1));
+        entries.sort_by_key(|(_, total)| Reverse(*total));
         entries.truncate(limit);
         entries
     }

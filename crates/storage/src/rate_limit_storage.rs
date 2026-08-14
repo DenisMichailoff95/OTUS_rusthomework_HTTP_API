@@ -61,6 +61,11 @@ impl RateLimitStorage {
         self.inner.len()
     }
 
+    /// Проверить, пусто ли хранилище (для тестов).
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
     /// Очистить все записи (для тестов).
     pub fn clear(&self) {
         self.inner.clear();
