@@ -77,5 +77,4 @@ desktop.ini
 # Test output
 /test-results/
 
-# GitHub Actions
-/.github/
+# GitHub Actions (всегда коммитить workflows)
