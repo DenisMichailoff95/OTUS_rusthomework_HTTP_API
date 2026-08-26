@@ -20,10 +20,3 @@ metrics-exporter-prometheus = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }
 rand = { workspace = true }
-
-[dev-dependencies]
-criterion = { workspace = true }
-
-[[bench]]
-name = "repo_bench"
-harness = false

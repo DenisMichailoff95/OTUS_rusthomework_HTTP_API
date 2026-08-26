@@ -12,7 +12,6 @@ publish = false
 anyhow = "1.0.104"
 async-trait = "0.1.91"
 axum = "0.8.9"
-criterion = "0.8.2"
 dashmap = "6.2.1"
 http-body-util = "0.1.4"
 mime = "0.3.17"
