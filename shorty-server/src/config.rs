@@ -38,7 +38,7 @@ impl Default for Config {
             rate_limit_period_secs: 60,
             rate_limit_cleanup_ttl_secs: 120,
             storage_type: StorageType::InMemory,
-            database_url: "postgres://postgres:postgres@localhost:5432/shorty".to_string(),
+            database_url: "postgres://postgres:postgres@localhost:5499/shorty".to_string(),
             redis_url: Some("redis://localhost:6379".to_string()),
             cache_ttl_secs: 60,
             cache_jitter_secs: 10,

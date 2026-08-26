@@ -16,7 +16,7 @@ docker compose up -d
 SQLX_OFFLINE=true cargo build --workspace
 
 # 4. Запустить сервис
-STORAGE_TYPE=postgres DATABASE_URL=postgres://postgres:postgres@localhost:5432/shorty REDIS_URL=redis://localhost:6379 cargo run --package shorty-server
+STORAGE_TYPE=postgres DATABASE_URL=postgres://postgres:postgres@localhost:5499/shorty REDIS_URL=redis://localhost:6379 cargo run --package shorty-server
 ```
 
 ### Переменные окружения
@@ -25,7 +25,7 @@ STORAGE_TYPE=postgres DATABASE_URL=postgres://postgres:postgres@localhost:5432/s
 
 ```env
 STORAGE_TYPE=postgres
-DATABASE_URL=postgres://postgres:postgres@localhost:5432/shorty
+DATABASE_URL=postgres://postgres:postgres@localhost:5499/shorty
 REDIS_URL=redis://localhost:6379
 LISTEN_ADDR=0.0.0.0:8080
 LOG_FORMAT=json
@@ -124,7 +124,7 @@ TTTL 60 секунд с jitter ±10 секунд. Обоснование: дос
 
 ```bash
 # Применить миграции вручную
-DATABASE_URL=postgres://postgres:postgres@localhost:5432/shorty cargo sqlx migrate run --source crates/storage/migrations
+DATABASE_URL=postgres://postgres:postgres@localhost:5499/shorty cargo sqlx migrate run --source crates/storage/migrations
 ```
 
 ## Тестирование
