@@ -3,6 +3,7 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use domain::LinkStats;
+use domain::ShortLink;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
@@ -19,6 +20,14 @@ pub struct CreateLinkRequest {
     pub ttl_seconds: Option<u64>,
 }
 
+/// Тело `PUT /api/v1/links/{code}`.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct UpdateLinkRequest {
+    pub target_url: String,
+    pub version: i64,
+}
+
 /// Представление ссылки в ответах API.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -28,6 +37,15 @@ pub struct LinkResponse {
     pub created_at_unix: u64,
     pub expires_at_unix: Option<u64>,
     pub hits: u64,
+    pub version: i64,
+}
+
+/// Ответ со списком ссылок.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ListLinksResponse {
+    pub links: Vec<LinkResponse>,
+    pub next_cursor: Option<String>,
 }
 
 impl From<LinkStats> for LinkResponse {
@@ -38,11 +56,25 @@ impl From<LinkStats> for LinkResponse {
             created_at_unix: unix_secs(stats.link.created_at),
             expires_at_unix: stats.link.expires_at.map(unix_secs),
             hits: stats.hits,
+            version: stats.link.version,
         }
     }
 }
 
-fn unix_secs(t: SystemTime) -> u64 {
+impl From<ShortLink> for LinkResponse {
+    fn from(link: ShortLink) -> Self {
+        Self {
+            code: link.code,
+            target_url: link.target_url,
+            created_at_unix: unix_secs(link.created_at),
+            expires_at_unix: link.expires_at.map(unix_secs),
+            hits: 0,
+            version: link.version,
+        }
+    }
+}
+
+pub fn unix_secs(t: SystemTime) -> u64 {
     t.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
 }
 

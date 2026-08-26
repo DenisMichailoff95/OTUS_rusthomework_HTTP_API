@@ -14,7 +14,8 @@ use shorty_server::{
     api::{dto::LinkResponse, error::ErrorBody},
     build_router,
 };
-use storage::InMemoryRepo;
+use storage::telemetry::init_metrics;
+use storage::{Cache, InMemoryRepo};
 use tower::ServiceExt;
 
 fn test_state() -> (AppState, Arc<InMemoryRepo>) {
@@ -28,6 +29,8 @@ fn test_state() -> (AppState, Arc<InMemoryRepo>) {
         repo: repo.clone(),
         stats_storage: stats_storage.clone(),
         config: Arc::new(config),
+        cache: Cache::disabled(),
+        metrics_handle: storage::telemetry::init_metrics(),
     };
     (state, repo)
 }
@@ -355,6 +358,8 @@ async fn rate_limit_works() {
         repo: repo.clone(),
         stats_storage: stats_storage.clone(),
         config: config.clone(),
+        cache: Cache::disabled(),
+        metrics_handle: init_metrics(),
     };
     let app = build_router(state);
 
