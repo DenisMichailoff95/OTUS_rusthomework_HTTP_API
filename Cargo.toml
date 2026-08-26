@@ -7,9 +7,7 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
-# Общие зависимости workspace: версии задаются в одном месте,
-# члены workspace подключают их через `dep = { workspace = true }`,
-# чтобы версии не расползались между crates.
+# Общие зависимости workspace
 [workspace.dependencies]
 anyhow = "1.0.104"
 async-trait = "0.1.91"
@@ -22,20 +20,19 @@ nanoid = "0.5.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 thiserror = "2.0.19"
-tokio = { version = "1.53.1", features = [
-    "rt-multi-thread",
-    "macros",
-    "signal",
-    "time",
-] }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "signal", "time"] }
 tokio-util = { version = "0.7.18", features = ["rt"] }
 tower = { version = "0.5.3", features = ["util"] }
-tower-http = { version = "0.7.0", features = [
-    "trace",
-    "timeout",
-    "limit",
-    "request-id",
-] }
+tower-http = { version = "0.7.0", features = ["trace", "timeout", "limit", "request-id"] }
 tracing = "0.1.44"
-tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 url = "2.5.8"
+
+# Новые зависимости для PostgreSQL, Redis и метрик
+sqlx = { version = "0.8.6", features = ["runtime-tokio-native-tls", "postgres", "uuid", "chrono", "migrate", "derive", "macros"] }
+redis = { version = "0.27.6", features = ["tokio-comp", "connection-manager"] }
+chrono = { version = "0.4.45", features = ["serde"] }
+uuid = { version = "1.24.0", features = ["v4", "serde"] }
+metrics = "0.24.6"
+metrics-exporter-prometheus = "0.18.3"
+rand = "0.10.2"

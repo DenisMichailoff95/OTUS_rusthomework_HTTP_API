@@ -1,9 +1,6 @@
 //! Обработчики HTTP запросов.
-//!
-//! Каждый handler отвечает за конкретный endpoint и
-//! делегирует логику в доменный слой через хранилище.
 
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 use axum::{
     Json,
@@ -13,6 +10,7 @@ use axum::{
 };
 use domain::{RepoError, ShortLink};
 use serde::Serialize;
+use storage::link_key;
 
 use super::{
     dto::{
@@ -27,16 +25,6 @@ use crate::AppState;
 // CRUD операции со ссылками
 // ---------------------------------------------------------------------------
 
-/// Создание новой короткой ссылки.
-///
-/// Если `custom_code` не указан, генерируется автоматически.
-/// При указании `ttl_seconds` ссылка будет автоматически удалена
-/// фоновым процессом после истечения срока.
-///
-/// # Ошибки
-/// - 409 - код уже занят
-/// - 422 - невалидный URL или код
-/// - 429 - превышен rate limit
 pub async fn create_link(
     State(state): State<AppState>,
     AppJson(req): AppJson<CreateLinkRequest>,
@@ -61,21 +49,32 @@ pub async fn create_link(
     ))
 }
 
-/// Получение метаданных ссылки.
-///
-/// Возвращает информацию о ссылке включая количество переходов.
+/// Получение ссылки с кешированием (cache-aside)
 pub async fn get_link(
     State(state): State<AppState>,
     Path(code): Path<String>,
 ) -> Result<Json<LinkResponse>, AppError> {
+    let key = link_key(&code);
+
+    // Пытаемся получить из кеша
+    if let Some(cached) = state.cache.get::<LinkResponse>(&key).await {
+        tracing::debug!(code = %code, "cache hit");
+        return Ok(Json(cached));
+    }
+
+    tracing::debug!(code = %code, "cache miss");
+
+    // Промах - идем в БД
     let stats = state.repo.stats(&code).await?;
-    Ok(Json(stats.into()))
+    let response: LinkResponse = stats.into();
+
+    // Сохраняем в кеш
+    state.cache.set(&key, &response).await;
+
+    Ok(Json(response))
 }
 
-/// Редирект по короткому коду.
-///
-/// Автоматически инкрементирует счетчик переходов.
-/// Возвращает 307 Temporary Redirect для сохранения метода запроса.
+/// Редирект с инкрементом счетчика
 pub async fn redirect(
     State(state): State<AppState>,
     Path(code): Path<String>,
@@ -85,27 +84,30 @@ pub async fn redirect(
         return Err(AppError::NotFound);
     }
     state.repo.record_hit(&code).await?;
+
+    // Инвалидируем кеш после обновления счетчика
+    state.cache.invalidate(&link_key(&code)).await;
+
     Ok((
         StatusCode::TEMPORARY_REDIRECT,
         [(header::LOCATION, link.target_url)],
     ))
 }
 
-/// Удаление ссылки.
-///
-/// # Контракт
-/// - 204 - успешное удаление
-/// - 404 - ссылка не найдена
+/// Удаление ссылки с инвалидацией кеша
 pub async fn delete_link(
     State(state): State<AppState>,
     Path(code): Path<String>,
 ) -> Result<StatusCode, AppError> {
     state.repo.remove(&code).await?;
+
+    // Инвалидируем кеш после удаления
+    state.cache.invalidate(&link_key(&code)).await;
+
     Ok(StatusCode::NO_CONTENT)
 }
 
 /// Обработчик для неизвестных путей.
-/// Возвращает 404 в едином формате ошибок.
 pub async fn fallback_404() -> AppError {
     AppError::NotFound
 }
@@ -114,9 +116,6 @@ pub async fn fallback_404() -> AppError {
 // Вспомогательные функции
 // ---------------------------------------------------------------------------
 
-/// Генерация уникального кода с повторными попытками.
-///
-/// Использует атомарную операцию вставки для проверки занятости.
 async fn generate_code(
     state: &AppState,
     target_url: &str,
@@ -136,7 +135,6 @@ async fn generate_code(
     )))
 }
 
-/// Атомарная вставка ссылки с проверкой занятости кода.
 async fn insert_link(
     state: &AppState,
     code: &str,
@@ -148,7 +146,6 @@ async fn insert_link(
         .map_err(Into::into)
 }
 
-/// Внутренняя функция атомарной вставки.
 async fn try_insert_link(
     state: &AppState,
     code: &str,
@@ -176,31 +173,26 @@ pub struct Version {
     version: &'static str,
 }
 
-/// Проверка работоспособности сервиса.
 pub async fn healthz() -> Json<Health> {
     Json(Health { status: "ok" })
 }
 
-/// Версия сервиса из Cargo.toml.
 pub async fn version() -> Json<Version> {
     Json(Version {
         version: env!("CARGO_PKG_VERSION"),
     })
 }
 
-/// Демонстрация корректной обработки блокирующих операций.
 pub async fn slow() -> &'static str {
     tokio::task::spawn_blocking(|| {
-        std::thread::sleep(Duration::from_secs(2));
+        std::thread::sleep(std::time::Duration::from_secs(2));
     })
     .await
     .expect("blocking task panicked");
     "done: spawn_blocking kept workers free\n"
 }
 
-/// Демонстрация НЕПРАВИЛЬНОЙ обработки блокирующих операций.
-/// Этот метод блокирует поток выполнения и не должен использоваться в продакшене.
 pub async fn slow_blocking() -> &'static str {
-    std::thread::sleep(Duration::from_secs(2));
+    std::thread::sleep(std::time::Duration::from_secs(2));
     "done: but a worker thread was blocked for 2s!\n"
 }

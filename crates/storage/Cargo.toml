@@ -8,10 +8,20 @@ publish.workspace = true
 async-trait = { workspace = true }
 dashmap = { workspace = true }
 domain = { path = "../domain" }
+sqlx = { workspace = true }
+redis = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+metrics = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+rand = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
-tokio = { workspace = true }
 
 [[bench]]
 name = "repo_bench"

@@ -2,15 +2,18 @@
 
 pub mod api;
 pub mod cleanup;
+pub mod config;
 pub mod request_id;
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
+use std::time::Duration;
 
 use axum::{
     Router,
     routing::{get, post},
 };
 use domain::LinkRepository;
+use storage::Cache;
 use tower::ServiceBuilder;
 use tower_http::{
     limit::RequestBodyLimitLayer,
@@ -19,36 +22,9 @@ use tower_http::{
     trace::TraceLayer,
 };
 
+pub use config::Config;
+
 use crate::api::rate_limit::{RateLimitState, rate_limit_middleware};
-
-/// Конфигурация приложения.
-#[derive(Debug, Clone)]
-pub struct Config {
-    pub code_length: usize,
-    pub max_generate_attempts: usize,
-    pub request_timeout: Duration,
-    pub max_body_bytes: usize,
-    /// Лимит созданий ссылок в минуту.
-    pub rate_limit_capacity: u64,
-    /// Период rate limiter'а (в секундах).
-    pub rate_limit_period_secs: u64,
-    /// TTL для неактивных записей rate limiter'а.
-    pub rate_limit_cleanup_ttl_secs: u64,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            code_length: 8,
-            max_generate_attempts: 5,
-            request_timeout: Duration::from_secs(5),
-            max_body_bytes: 16 * 1024,
-            rate_limit_capacity: 10,
-            rate_limit_period_secs: 60,
-            rate_limit_cleanup_ttl_secs: 120,
-        }
-    }
-}
 
 /// Состояние приложения.
 #[derive(Clone)]
@@ -56,6 +32,7 @@ pub struct AppState {
     pub repo: Arc<dyn LinkRepository>,
     pub stats_storage: Arc<domain::stats::StatsStorage>,
     pub config: Arc<Config>,
+    pub cache: Cache,
 }
 
 /// Сборка приложения.
