@@ -16,6 +16,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }
 rand = { workspace = true }

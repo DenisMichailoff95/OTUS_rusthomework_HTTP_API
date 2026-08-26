@@ -2244,6 +2244,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "base64",
  "chrono",
  "domain",
  "http-body-util",
@@ -2560,6 +2561,7 @@ dependencies = [
  "dashmap",
  "domain",
  "metrics",
+ "metrics-exporter-prometheus",
  "rand 0.10.2",
  "redis",
  "serde",

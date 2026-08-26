@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            DELETE FROM links \n            WHERE expires_at IS NOT NULL AND expires_at <= $1\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ef28fb8238a8cd828e7e4dd3c58e00f20e7fbc61e82e58e25ed3bb9d51de8782"
+}

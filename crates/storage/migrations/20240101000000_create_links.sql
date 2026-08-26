@@ -36,7 +36,8 @@ CREATE TABLE IF NOT EXISTS outbox (
     event_type TEXT NOT NULL,
     payload JSONB NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    published_at TIMESTAMPTZ,
-    
-    INDEX idx_outbox_published_at (published_at) WHERE published_at IS NULL
+    published_at TIMESTAMPTZ
 );
+
+-- Индекс для outbox (для future use)
+CREATE INDEX IF NOT EXISTS idx_outbox_published_at ON outbox(published_at) WHERE published_at IS NULL;

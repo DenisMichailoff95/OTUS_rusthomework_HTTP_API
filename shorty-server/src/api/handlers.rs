@@ -14,12 +14,14 @@ use storage::link_key;
 
 use super::{
     dto::{
-        CreateLinkRequest, LinkResponse, expires_at_from_ttl, parse_target_url,
-        validate_custom_code,
+        CreateLinkRequest, LinkResponse, ListLinksResponse, UpdateLinkRequest, expires_at_from_ttl,
+        parse_target_url, unix_secs, validate_custom_code,
     },
     error::{AppError, AppJson},
 };
 use crate::AppState;
+
+use base64::Engine;
 
 // ---------------------------------------------------------------------------
 // CRUD операции со ссылками
@@ -49,6 +51,30 @@ pub async fn create_link(
     ))
 }
 
+/// Обновление ссылки с optimistic locking
+pub async fn update_link(
+    State(state): State<AppState>,
+    Path(code): Path<String>,
+    AppJson(req): AppJson<UpdateLinkRequest>,
+) -> Result<Json<LinkResponse>, AppError> {
+    let target_url = parse_target_url(&req.target_url)?;
+    let link = state
+        .repo
+        .update(&code, target_url.as_str(), req.version)
+        .await?;
+
+    state.cache.invalidate(&link_key(&code)).await;
+
+    Ok(Json(LinkResponse {
+        code: link.code,
+        target_url: link.target_url,
+        created_at_unix: unix_secs(link.created_at),
+        expires_at_unix: link.expires_at.map(unix_secs),
+        hits: 0,
+        version: link.version,
+    }))
+}
+
 /// Получение ссылки с кешированием (cache-aside)
 pub async fn get_link(
     State(state): State<AppState>,
@@ -56,7 +82,6 @@ pub async fn get_link(
 ) -> Result<Json<LinkResponse>, AppError> {
     let key = link_key(&code);
 
-    // Пытаемся получить из кеша
     if let Some(cached) = state.cache.get::<LinkResponse>(&key).await {
         tracing::debug!(code = %code, "cache hit");
         return Ok(Json(cached));
@@ -64,12 +89,48 @@ pub async fn get_link(
 
     tracing::debug!(code = %code, "cache miss");
 
-    // Промах - идем в БД
     let stats = state.repo.stats(&code).await?;
     let response: LinkResponse = stats.into();
 
-    // Сохраняем в кеш
     state.cache.set(&key, &response).await;
+
+    Ok(Json(response))
+}
+
+/// Листинг ссылок с keyset пагинацией
+pub async fn list_links(
+    State(state): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<ListLinksResponse>, AppError> {
+    let limit = params
+        .get("limit")
+        .and_then(|l| l.parse::<u64>().ok())
+        .unwrap_or(20)
+        .min(100);
+
+    let cursor = params.get("cursor").and_then(|c| {
+        let decoded = base64::engine::general_purpose::STANDARD_NO_PAD
+            .decode(c)
+            .ok()?;
+        let decoded_str = String::from_utf8(decoded).ok()?;
+        serde_json::from_str::<(String, String)>(&decoded_str).ok()
+    });
+
+    let (links, next_cursor) = state
+        .repo
+        .list(
+            limit,
+            cursor.as_ref().map(|(a, b)| (a.as_str(), b.as_str())),
+        )
+        .await?;
+
+    let response = ListLinksResponse {
+        links: links.into_iter().map(LinkResponse::from).collect(),
+        next_cursor: next_cursor.map(|(ts, code)| {
+            let json = serde_json::to_string(&(ts, code)).unwrap();
+            base64::engine::general_purpose::STANDARD_NO_PAD.encode(json)
+        }),
+    };
 
     Ok(Json(response))
 }

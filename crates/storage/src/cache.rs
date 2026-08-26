@@ -189,10 +189,10 @@ impl Cache {
 
     /// TTL с jitter
     fn jittered_ttl(&self) -> Duration {
-        use rand::Rng;
+        use rand::RngExt;
         let base = self.config.ttl_secs as i64;
         let jitter = self.config.jitter_secs as i64;
-        let offset = rand::thread_rng().gen_range(-jitter..=jitter);
+        let offset = rand::rng().random_range(-jitter..=jitter);
         Duration::from_secs((base + offset).max(1) as u64)
     }
 }
@@ -214,7 +214,7 @@ mod tests {
 
     #[test]
     fn test_jittered_ttl_stays_in_bounds() {
-        let config = CacheConfig::default();
+        let _config = CacheConfig::default();
         let cache = Cache::disabled();
 
         for _ in 0..100 {

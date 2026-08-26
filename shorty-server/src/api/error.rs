@@ -21,15 +21,18 @@ use crate::request_id::current_request_id;
 /// наружу в ответе, только в логи.
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
-    /// Ресурс не найден → 404.
     #[error("resource not found")]
     NotFound,
 
-    /// Код ссылки занят → 409.
     #[error("code is already taken")]
     CodeTaken,
 
-    /// Семантически невалидные данные → 422.
+    #[error("version conflict")]
+    VersionConflict,
+
+    #[error("storage unavailable")]
+    Unavailable,
+
     #[error("{0}")]
     Validation(String),
 
@@ -71,6 +74,8 @@ impl IntoResponse for AppError {
         let (status, code) = match &self {
             AppError::NotFound => (StatusCode::NOT_FOUND, "not_found"),
             AppError::CodeTaken => (StatusCode::CONFLICT, "code_taken"),
+            AppError::VersionConflict => (StatusCode::CONFLICT, "version_conflict"),
+            AppError::Unavailable => (StatusCode::SERVICE_UNAVAILABLE, "unavailable"),
             AppError::Validation(_) => (StatusCode::UNPROCESSABLE_ENTITY, "validation_error"),
             AppError::InvalidBody { status, .. } => (
                 *status,
@@ -117,6 +122,9 @@ impl From<domain::RepoError> for AppError {
         match err {
             domain::RepoError::NotFound(_) => AppError::NotFound,
             domain::RepoError::CodeTaken(_) => AppError::CodeTaken,
+            domain::RepoError::VersionConflict => AppError::VersionConflict,
+            domain::RepoError::Unavailable => AppError::Unavailable,
+            domain::RepoError::Internal(_) => AppError::Internal(anyhow::anyhow!("internal error")),
         }
     }
 }

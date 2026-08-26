@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use domain::LinkRepository;
+use shorty_server::config::StorageType;
 use shorty_server::{AppState, Config, build_router, cleanup};
 use storage::{Cache, CacheConfig, InMemoryRepo, PostgresRepo, spawn_pool_metrics};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
@@ -55,11 +56,11 @@ fn init_tracing() {
 /// Создание репозитория в зависимости от конфигурации
 async fn create_repository(config: &Config) -> Arc<dyn LinkRepository> {
     match config.storage_type {
-        Config::StorageType::InMemory => {
+        StorageType::InMemory => {
             tracing::info!("Using in-memory storage");
             Arc::new(InMemoryRepo::new())
         }
-        Config::StorageType::Postgres => {
+        StorageType::Postgres => {
             tracing::info!("Using PostgreSQL storage");
             let pool = sqlx::postgres::PgPoolOptions::new()
                 .max_connections(10)
@@ -68,13 +69,11 @@ async fn create_repository(config: &Config) -> Arc<dyn LinkRepository> {
                 .await
                 .expect("failed to connect to PostgreSQL");
 
-            // Применяем миграции
             sqlx::migrate!("../crates/storage/migrations")
                 .run(&pool)
                 .await
                 .expect("failed to run migrations");
 
-            // Запускаем сбор метрик пула
             spawn_pool_metrics(pool.clone());
 
             Arc::new(PostgresRepo::new(pool))
@@ -122,6 +121,7 @@ async fn run() {
         stats_storage: stats_storage.clone(),
         config: config.clone(),
         cache: cache.clone(),
+        metrics_handle: storage::telemetry::init_metrics(),
     };
 
     // Запуск уборщика

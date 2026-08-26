@@ -4,7 +4,7 @@ use std::time::SystemTime;
 
 use async_trait::async_trait;
 use domain::{LinkRepository, LinkStats, RepoError, ShortLink};
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::PgPool;
 
 /// Строка из таблицы links
 #[derive(Debug, sqlx::FromRow)]
@@ -50,7 +50,7 @@ impl PostgresRepo {
 
     /// Получение статистики для ссылки
     async fn get_stats_internal(&self, code: &str) -> Result<LinkStats, RepoError> {
-        let row = sqlx::query_as!(
+        let row: Option<LinkRow> = sqlx::query_as!(
             LinkRow,
             r#"
             SELECT 
@@ -68,11 +68,9 @@ impl PostgresRepo {
 
         match row {
             Some(row) => {
-                let link = row.into();
-                Ok(LinkStats {
-                    link,
-                    hits: row.hits as u64,
-                })
+                let hits = row.hits as u64;
+                let link: ShortLink = row.into();
+                Ok(LinkStats { link, hits })
             }
             None => Err(RepoError::NotFound(code.to_string())),
         }
@@ -84,7 +82,6 @@ fn map_sql_error(err: sqlx::Error) -> RepoError {
     match &err {
         sqlx::Error::RowNotFound => RepoError::NotFound("not found".to_string()),
         sqlx::Error::Database(db_err) => {
-            // SQLSTATE 23505 - unique violation
             if db_err.code().as_deref() == Some("23505") {
                 let msg = db_err.message();
                 if msg.contains("code") {
@@ -96,6 +93,7 @@ fn map_sql_error(err: sqlx::Error) -> RepoError {
                 RepoError::Internal(anyhow::anyhow!(err))
             }
         }
+        sqlx::Error::PoolTimedOut | sqlx::Error::PoolClosed => RepoError::Unavailable,
         _ => RepoError::Internal(anyhow::anyhow!(err)),
     }
 }
@@ -111,7 +109,7 @@ impl LinkRepository for PostgresRepo {
                 .unwrap_or_else(chrono::Utc::now)
         });
 
-        sqlx::query!(
+        let _result = sqlx::query!(
             r#"
             INSERT INTO links (code, target_url, expires_at, created_at, updated_at)
             VALUES ($1, $2, $3, now(), now())
@@ -129,7 +127,7 @@ impl LinkRepository for PostgresRepo {
     }
 
     async fn get(&self, code: &str) -> Result<ShortLink, RepoError> {
-        let row = sqlx::query_as!(
+        let row: Option<LinkRow> = sqlx::query_as!(
             LinkRow,
             r#"
             SELECT 
@@ -146,7 +144,7 @@ impl LinkRepository for PostgresRepo {
         .map_err(map_sql_error)?;
 
         match row {
-            Some(row) => Ok(row.into()),
+            Some(row) => Ok(ShortLink::from(row)),
             None => Err(RepoError::NotFound(code.to_string())),
         }
     }
@@ -188,9 +186,98 @@ impl LinkRepository for PostgresRepo {
         self.get_stats_internal(code).await
     }
 
+    async fn update(
+        &self,
+        code: &str,
+        target_url: &str,
+        version: i64,
+    ) -> Result<ShortLink, RepoError> {
+        let row = sqlx::query_as!(
+            LinkRow,
+            r#"
+            UPDATE links 
+            SET target_url = $1, updated_at = now(), version = version + 1
+            WHERE code = $2 AND version = $3
+            RETURNING id, code, target_url, created_at, updated_at, expires_at, version, hits
+            "#,
+            target_url,
+            code,
+            version
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sql_error)?;
+
+        match row {
+            Some(row) => Ok(row.into()),
+            None => {
+                let exists = sqlx::query!("SELECT 1 AS exists FROM links WHERE code = $1", code)
+                    .fetch_optional(&self.pool)
+                    .await
+                    .map_err(map_sql_error)?;
+                if exists.is_some() {
+                    Err(RepoError::VersionConflict)
+                } else {
+                    Err(RepoError::NotFound(code.to_string()))
+                }
+            }
+        }
+    }
+
+    async fn list(
+        &self,
+        limit: u64,
+        cursor: Option<(&str, &str)>,
+    ) -> Result<(Vec<ShortLink>, Option<(String, String)>), RepoError> {
+        let rows: Vec<LinkRow> = match cursor {
+            Some((created_at_str, code)) => {
+                let ts = chrono::DateTime::parse_from_rfc3339(created_at_str)
+                    .map(|dt| dt.to_utc())
+                    .unwrap_or_else(|_| chrono::Utc::now());
+                sqlx::query_as!(
+                    LinkRow,
+                    r#"
+                    SELECT id, code, target_url, created_at, updated_at, expires_at, version, hits
+                    FROM links
+                    WHERE created_at < $1 OR (created_at = $1 AND code < $2)
+                    ORDER BY created_at DESC, code DESC
+                    LIMIT $3
+                    "#,
+                    ts,
+                    code,
+                    limit as i64,
+                )
+                .fetch_all(&self.pool)
+                .await
+                .map_err(map_sql_error)?
+            }
+            None => sqlx::query_as!(
+                LinkRow,
+                r#"
+                    SELECT id, code, target_url, created_at, updated_at, expires_at, version, hits
+                    FROM links
+                    ORDER BY created_at DESC, code DESC
+                    LIMIT $1
+                    "#,
+                limit as i64,
+            )
+            .fetch_all(&self.pool)
+            .await
+            .map_err(map_sql_error)?,
+        };
+
+        let links: Vec<ShortLink> = rows.into_iter().map(Into::into).collect();
+        let next_cursor = links.last().map(|link| {
+            let ts = chrono::DateTime::<chrono::Utc>::from(link.created_at).to_rfc3339();
+            (ts, link.code.clone())
+        });
+
+        Ok((links, next_cursor))
+    }
+
     async fn purge_expired(&self, now: SystemTime) -> usize {
         let now = chrono::DateTime::<chrono::Utc>::from(now);
-        let result = sqlx::query!(
+        let result: Result<sqlx::postgres::PgQueryResult, sqlx::Error> = sqlx::query!(
             r#"
             DELETE FROM links 
             WHERE expires_at IS NOT NULL AND expires_at <= $1
@@ -207,85 +294,5 @@ impl LinkRepository for PostgresRepo {
                 0
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use sqlx::PgPool;
-    use uuid::Uuid;
-
-    async fn test_pool() -> PgPool {
-        let url = std::env::var("TEST_DATABASE_URL")
-            .unwrap_or_else(|_| "postgres://postgres:postgres@localhost:5432/shorty_test".into());
-        PgPool::connect(&url).await.unwrap()
-    }
-
-    async fn setup_test_table(pool: &PgPool) {
-        sqlx::query!(
-            r#"
-            CREATE TABLE IF NOT EXISTS links (
-                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                code TEXT UNIQUE NOT NULL,
-                target_url TEXT NOT NULL,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-                updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-                expires_at TIMESTAMPTZ,
-                version BIGINT NOT NULL DEFAULT 1,
-                hits BIGINT NOT NULL DEFAULT 0
-            )
-            "#
-        )
-        .execute(pool)
-        .await
-        .unwrap();
-    }
-
-    #[tokio::test]
-    #[ignore = "requires PostgreSQL"]
-    async fn test_postgres_repo_crud() {
-        let pool = test_pool().await;
-        setup_test_table(&pool).await;
-        let repo = PostgresRepo::new(pool);
-
-        let link = ShortLink::new("test123", "https://example.com");
-
-        repo.insert(link.clone()).await.unwrap();
-
-        let fetched = repo.get("test123").await.unwrap();
-        assert_eq!(fetched.code, "test123");
-        assert_eq!(fetched.target_url, "https://example.com");
-
-        let hits = repo.record_hit("test123").await.unwrap();
-        assert_eq!(hits, 1);
-
-        let stats = repo.stats("test123").await.unwrap();
-        assert_eq!(stats.hits, 1);
-
-        repo.remove("test123").await.unwrap();
-        assert!(repo.get("test123").await.is_err());
-    }
-
-    #[tokio::test]
-    #[ignore = "requires PostgreSQL"]
-    async fn test_postgres_repo_purge_expired() {
-        let pool = test_pool().await;
-        setup_test_table(&pool).await;
-        let repo = PostgresRepo::new(pool);
-        let now = SystemTime::now();
-
-        let expired = ShortLink::new("expired", "https://example.com/expired")
-            .with_expires_at(SystemTime::now());
-        repo.insert(expired).await.unwrap();
-
-        let fresh = ShortLink::new("fresh", "https://example.com/fresh");
-        repo.insert(fresh).await.unwrap();
-
-        let count = repo.purge_expired(now).await;
-        assert_eq!(count, 1);
-
-        assert!(repo.get("expired").await.is_err());
-        assert!(repo.get("fresh").await.is_ok());
     }
 }

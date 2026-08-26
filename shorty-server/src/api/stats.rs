@@ -96,7 +96,7 @@ mod tests {
     use crate::AppState;
     use domain::{LinkRepository, ShortLink};
     use std::sync::Arc;
-    use storage::InMemoryRepo;
+    use storage::{Cache, InMemoryRepo};
 
     #[tokio::test]
     async fn test_stats_endpoints() {
@@ -106,6 +106,8 @@ mod tests {
             repo: repo.clone(),
             stats_storage: stats_storage.clone(),
             config: Arc::new(crate::Config::default()),
+            cache: Cache::disabled(),
+            metrics_handle: storage::telemetry::init_metrics(),
         };
 
         // Используем асинхронный метод

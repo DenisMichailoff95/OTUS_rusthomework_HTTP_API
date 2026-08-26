@@ -36,3 +36,4 @@ uuid = { version = "1.24.0", features = ["v4", "serde"] }
 metrics = "0.24.6"
 metrics-exporter-prometheus = "0.18.3"
 rand = "0.10.2"
+base64 = "0.22"

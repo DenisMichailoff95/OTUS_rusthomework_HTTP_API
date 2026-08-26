@@ -3,7 +3,7 @@
 use std::{
     collections::HashMap,
     sync::{
-        Arc, RwLock,
+        RwLock,
         atomic::{AtomicU64, Ordering},
     },
     time::SystemTime,
@@ -19,11 +19,11 @@ pub struct LinkEntry {
 }
 
 impl LinkEntry {
-    fn new(link: ShortLink) -> Arc<Self> {
-        Arc::new(Self {
+    fn new(link: ShortLink) -> Self {
+        Self {
             link,
             hits: AtomicU64::new(0),
-        })
+        }
     }
 
     fn stats(&self) -> LinkStats {
@@ -37,7 +37,7 @@ impl LinkEntry {
 /// Основное хранилище сервиса.
 #[derive(Default)]
 pub struct InMemoryRepo {
-    inner: RwLock<HashMap<String, Arc<LinkEntry>>>,
+    inner: RwLock<HashMap<String, LinkEntry>>,
     stats: StatsStorage,
 }
 
@@ -88,6 +88,66 @@ impl InMemoryRepo {
         Ok(new_hits)
     }
 
+    pub fn update_sync(&self, code: &str, target_url: &str) -> Result<ShortLink, RepoError> {
+        let mut map = self.inner.write().expect("lock poisoned");
+        let entry = map
+            .get_mut(code)
+            .ok_or_else(|| RepoError::NotFound(code.to_string()))?;
+        entry.link.target_url = target_url.to_string();
+        entry.link.updated_at = SystemTime::now();
+        entry.link.version += 1;
+        Ok(entry.link.clone())
+    }
+
+    pub fn list_sync(
+        &self,
+        limit: usize,
+        cursor: Option<(&str, &str)>,
+    ) -> (Vec<ShortLink>, Option<(String, String)>) {
+        use std::time::UNIX_EPOCH;
+        let mut entries: Vec<_> = self
+            .inner
+            .read()
+            .expect("lock poisoned")
+            .values()
+            .map(|e| e.link.clone())
+            .collect();
+
+        entries.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(b.code.cmp(&a.code)));
+
+        let start = match cursor {
+            Some((c_ts, c_code)) => entries
+                .iter()
+                .position(|link| {
+                    link.created_at
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs()
+                        .to_string()
+                        == c_ts
+                        && link.code == c_code
+                })
+                .map(|i| i + 1)
+                .unwrap_or(0),
+            None => 0,
+        };
+
+        let end = (start + limit).min(entries.len());
+        let page = entries[start..end].to_vec();
+
+        let next_cursor = page.last().map(|link| {
+            let ts = link
+                .created_at
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+                .to_string();
+            (ts, link.code.clone())
+        });
+
+        (page, next_cursor)
+    }
+
     pub fn stats_sync(&self, code: &str) -> Result<LinkStats, RepoError> {
         let map = self.inner.read().expect("lock poisoned");
         map.get(code)
@@ -124,6 +184,15 @@ impl LinkRepository for InMemoryRepo {
         self.get_sync(code)
     }
 
+    async fn update(
+        &self,
+        code: &str,
+        target_url: &str,
+        _version: i64,
+    ) -> Result<ShortLink, RepoError> {
+        self.update_sync(code, target_url)
+    }
+
     async fn remove(&self, code: &str) -> Result<(), RepoError> {
         self.remove_sync(code)
     }
@@ -134,6 +203,14 @@ impl LinkRepository for InMemoryRepo {
 
     async fn stats(&self, code: &str) -> Result<LinkStats, RepoError> {
         self.stats_sync(code)
+    }
+
+    async fn list(
+        &self,
+        limit: u64,
+        cursor: Option<(&str, &str)>,
+    ) -> Result<(Vec<ShortLink>, Option<(String, String)>), RepoError> {
+        Ok(self.list_sync(limit as usize, cursor))
     }
 
     async fn purge_expired(&self, now: SystemTime) -> usize {

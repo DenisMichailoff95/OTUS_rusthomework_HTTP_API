@@ -36,17 +36,18 @@ pub struct LinkStats {
 }
 
 /// Ошибки, возникающие при работе с хранилищем
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[derive(Debug, thiserror::Error)]
 pub enum RepoError {
-    /// Попытка использовать уже занятый код
     #[error("code '{0}' is already taken")]
     CodeTaken(String),
-    /// Ссылка с указанным кодом не найдена
     #[error("link '{0}' not found")]
     NotFound(String),
-    /// Внутренняя ошибка
+    #[error("version conflict")]
+    VersionConflict,
+    #[error("storage unavailable")]
+    Unavailable,
     #[error("internal error")]
-    Internal(#[from] anyhow::Error), // <-- теперь anyhow доступен
+    Internal(#[from] anyhow::Error),
 }
 
 /// Контракт хранилища ссылок.
@@ -54,9 +55,20 @@ pub enum RepoError {
 pub trait LinkRepository: Send + Sync {
     async fn insert(&self, link: ShortLink) -> Result<(), RepoError>;
     async fn get(&self, code: &str) -> Result<ShortLink, RepoError>;
+    async fn update(
+        &self,
+        code: &str,
+        target_url: &str,
+        version: i64,
+    ) -> Result<ShortLink, RepoError>;
     async fn remove(&self, code: &str) -> Result<(), RepoError>;
     async fn record_hit(&self, code: &str) -> Result<u64, RepoError>;
     async fn stats(&self, code: &str) -> Result<LinkStats, RepoError>;
+    async fn list(
+        &self,
+        limit: u64,
+        cursor: Option<(&str, &str)>,
+    ) -> Result<(Vec<ShortLink>, Option<(String, String)>), RepoError>;
     async fn purge_expired(&self, now: SystemTime) -> usize;
 }
 
