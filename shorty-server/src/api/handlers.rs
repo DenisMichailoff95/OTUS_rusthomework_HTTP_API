@@ -343,6 +343,36 @@ pub async fn healthz() -> Json<Health> {
     Json(Health { status: "ok" })
 }
 
+/// Readiness check эндпоинт (публичный).
+#[utoipa::path(
+    get,
+    path = "/readyz",
+    tags = ["health"],
+    responses(
+        (status = 200, description = "Сервис готов"),
+        (status = 503, description = "Сервис не готов")
+    )
+)]
+pub async fn readyz(State(state): State<AppState>) -> axum::http::StatusCode {
+    if state.shutdown_token.is_cancelled() {
+        return axum::http::StatusCode::SERVICE_UNAVAILABLE;
+    }
+
+    if let Some(pool) = &state.db_pool {
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            sqlx::query("SELECT 1").execute(pool),
+        )
+        .await
+        {
+            Ok(Ok(_)) => return axum::http::StatusCode::OK,
+            _ => return axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        }
+    }
+
+    axum::http::StatusCode::OK
+}
+
 /// Версия сервиса (публичный).
 #[utoipa::path(
     get,
