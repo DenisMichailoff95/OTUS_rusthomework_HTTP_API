@@ -27,8 +27,10 @@ jobs:
         with:
           path: target
           key: target-${{ hashFiles('**/Cargo.toml') }}
-      - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Install protoc and openssl
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler openssl
+      - name: Generate JWT keys for tests
+        run: bash scripts/gen-keys.sh
       - name: Check formatting
         run: cargo fmt -- --check
       - name: Check workspace
