@@ -1,15 +1,15 @@
-//! Тонкий бинарник.
+//! Точка входа с выбором хранилища.
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use domain::LinkRepository;
-use shorty_server::{AppState, Config, build_router, cleanup};
-use storage::InMemoryRepo;
+use shorty_server::config::StorageType;
+use shorty_server::{AppState, Config, build_router, cleanup, grpc};
+use storage::{Cache, CacheConfig, InMemoryRepo, PostgresRepo, spawn_pool_metrics};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
-use tracing_subscriber::EnvFilter;
 
-const CLEANUP_PERIOD: Duration = Duration::from_secs(30);
-const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
+const CLEANUP_PERIOD: std::time::Duration = std::time::Duration::from_secs(30);
+const SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 async fn shutdown_signal() {
     let ctrl_c = async {
@@ -35,64 +35,157 @@ async fn shutdown_signal() {
     }
 }
 
-fn load_config() -> Config {
-    let mut config = Config::default();
+/// Инициализация tracing
+fn init_tracing() {
+    let json_logs = std::env::var("LOG_FORMAT").is_ok_and(|f| f == "json");
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,sqlx=warn"));
 
-    if let Ok(val) = std::env::var("CODE_LENGTH") {
-        config.code_length = val.parse().expect("CODE_LENGTH must be a number");
+    if json_logs {
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .json()
+            .with_current_span(true)
+            .with_span_list(false)
+            .init();
+    } else {
+        tracing_subscriber::fmt().with_env_filter(filter).init();
     }
+}
 
-    if let Ok(val) = std::env::var("RATE_LIMIT_CAPACITY") {
-        config.rate_limit_capacity = val.parse().expect("RATE_LIMIT_CAPACITY must be a number");
+/// Создание репозитория в зависимости от конфигурации
+async fn create_repository(config: &Config) -> Arc<dyn LinkRepository> {
+    match config.storage_type {
+        StorageType::InMemory => {
+            tracing::info!("Using in-memory storage");
+            Arc::new(InMemoryRepo::new())
+        }
+        StorageType::Postgres => {
+            tracing::info!("Using PostgreSQL storage");
+            let pool = sqlx::postgres::PgPoolOptions::new()
+                .max_connections(10)
+                .acquire_timeout(std::time::Duration::from_secs(3))
+                .connect(&config.database_url)
+                .await
+                .expect("failed to connect to PostgreSQL");
+
+            sqlx::migrate!("../crates/storage/migrations")
+                .run(&pool)
+                .await
+                .expect("failed to run migrations");
+
+            spawn_pool_metrics(pool.clone());
+
+            Arc::new(PostgresRepo::new(pool))
+        }
     }
+}
 
-    if let Ok(val) = std::env::var("RATE_LIMIT_PERIOD_SECS") {
-        config.rate_limit_period_secs = val
-            .parse()
-            .expect("RATE_LIMIT_PERIOD_SECS must be a number");
+/// Создание кеша
+async fn create_cache(config: &Config) -> Cache {
+    let cache_config = CacheConfig {
+        ttl_secs: config.cache_ttl_secs,
+        jitter_secs: config.cache_jitter_secs,
+        op_timeout_ms: config.cache_op_timeout_ms,
+    };
+
+    match &config.redis_url {
+        Some(url) => {
+            tracing::info!("Redis cache enabled: {}", url);
+            Cache::connect(url, cache_config).await
+        }
+        None => {
+            tracing::warn!("Redis cache disabled");
+            Cache::disabled()
+        }
     }
-
-    // CLEANUP_INTERVAL_SECS - пока используем константу, но переменная доступна
-    if let Ok(_val) = std::env::var("CLEANUP_INTERVAL_SECS") {
-        // Для простоты оставим как есть, но можно использовать для переопределения
-        // В будущем можно добавить: config.cleanup_interval = _val.parse()...
-    }
-
-    config
 }
 
 async fn run() {
-    let addr = std::env::var("LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
-    let listener = tokio::net::TcpListener::bind(&addr)
-        .await
-        .unwrap_or_else(|e| panic!("failed to bind {addr}: {e}"));
+    init_tracing();
 
-    let config = Arc::new(load_config());
-    let repo: Arc<dyn LinkRepository> = Arc::new(InMemoryRepo::new());
+    let config = Arc::new(Config::from_env());
+    let http_addr = std::env::var("LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
+    let grpc_addr =
+        std::env::var("GRPC_LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:50051".to_string());
+
+    // Инициализация метрик
+    let _metrics_handle = storage::telemetry::init_metrics();
+    tracing::info!("metrics initialized");
+
+    // Создаем репозиторий и кеш
+    let repo = create_repository(&config).await;
+    let cache = create_cache(&config).await;
     let stats_storage = Arc::new(domain::stats::StatsStorage::new());
+
+    let auth_config = config.auth.clone().map(Arc::new);
+    let db_pool = match config.storage_type {
+        StorageType::Postgres => {
+            let pool = sqlx::postgres::PgPoolOptions::new()
+                .max_connections(10)
+                .acquire_timeout(std::time::Duration::from_secs(3))
+                .connect(&config.database_url)
+                .await
+                .expect("failed to connect to PostgreSQL");
+            Some(pool)
+        }
+        _ => None,
+    };
+
+    let shutdown_token = CancellationToken::new();
 
     let state = AppState {
         repo: repo.clone(),
         stats_storage: stats_storage.clone(),
         config: config.clone(),
+        cache: cache.clone(),
+        metrics_handle: storage::telemetry::init_metrics(),
+        auth: auth_config.clone(),
+        shutdown_token: shutdown_token.clone(),
+        db_pool,
     };
 
-    let shutdown_token = CancellationToken::new();
+    // Запуск уборщика
     let tracker = TaskTracker::new();
     cleanup::spawn_cleaner(repo, CLEANUP_PERIOD, &tracker, shutdown_token.clone());
 
-    tracing::info!(%addr, "shorty server listening");
+    // Запуск HTTP сервера
+    let http_listener = tokio::net::TcpListener::bind(&http_addr)
+        .await
+        .unwrap_or_else(|e| panic!("failed to bind {http_addr}: {e}"));
+
+    tracing::info!(%http_addr, "HTTP server listening");
     tracing::info!(
-        rate_limit_capacity = config.rate_limit_capacity,
-        "rate limiter configured"
+        storage_type = ?config.storage_type,
+        cache_enabled = config.is_cache_enabled(),
+        auth_enabled = auth_config.is_some(),
+        "server configuration"
     );
 
-    axum::serve(listener, build_router(state))
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .expect("server error");
+    let grpc_state = state.clone();
+    let grpc_shutdown = shutdown_token.clone();
+    let grpc_task = tokio::spawn(async move {
+        let server = grpc::GrpcServer::new(grpc_state);
+        let addr = grpc_addr.parse().expect("invalid gRPC address");
+        server.serve(addr, grpc_shutdown).await;
+    });
 
-    shutdown_token.cancel();
+    let http_state = state.clone();
+    let http_task = tokio::spawn(async move {
+        axum::serve(http_listener, build_router(http_state))
+            .with_graceful_shutdown(async move {
+                shutdown_signal().await;
+                shutdown_token.cancel();
+            })
+            .await
+            .expect("server error");
+    });
+
+    tokio::select! {
+        _ = http_task => {},
+        _ = grpc_task => {},
+    };
+
     tracker.close();
     match tokio::time::timeout(SHUTDOWN_TIMEOUT, tracker.wait()).await {
         Ok(()) => tracing::info!("all background tasks finished, bye"),
@@ -104,12 +197,6 @@ async fn run() {
 }
 
 fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .init();
-
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.enable_all();
     if let Ok(n) = std::env::var("SHORTY_WORKER_THREADS") {

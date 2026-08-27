@@ -1,16 +1,26 @@
 //! Сервис коротких ссылок `shorty`.
 
+#![allow(clippy::result_large_err)]
+
 pub mod api;
+pub mod auth;
 pub mod cleanup;
+pub mod config;
+pub mod grpc;
 pub mod request_id;
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
+use axum::http::HeaderValue;
 use axum::{
     Router,
     routing::{get, post},
 };
 use domain::LinkRepository;
+use metrics_exporter_prometheus::PrometheusHandle;
+use sqlx::PgPool;
+use storage::Cache;
+use tokio_util::sync::CancellationToken;
 use tower::ServiceBuilder;
 use tower_http::{
     limit::RequestBodyLimitLayer,
@@ -18,37 +28,19 @@ use tower_http::{
     timeout::TimeoutLayer,
     trace::TraceLayer,
 };
+use utoipa::{Modify, OpenApi};
+use utoipa_swagger_ui::SwaggerUi;
 
-use crate::api::rate_limit::{RateLimitState, rate_limit_middleware};
+pub use config::Config;
 
-/// Конфигурация приложения.
-#[derive(Debug, Clone)]
-pub struct Config {
-    pub code_length: usize,
-    pub max_generate_attempts: usize,
-    pub request_timeout: Duration,
-    pub max_body_bytes: usize,
-    /// Лимит созданий ссылок в минуту.
-    pub rate_limit_capacity: u64,
-    /// Период rate limiter'а (в секундах).
-    pub rate_limit_period_secs: u64,
-    /// TTL для неактивных записей rate limiter'а.
-    pub rate_limit_cleanup_ttl_secs: u64,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            code_length: 8,
-            max_generate_attempts: 5,
-            request_timeout: Duration::from_secs(5),
-            max_body_bytes: 16 * 1024,
-            rate_limit_capacity: 10,
-            rate_limit_period_secs: 60,
-            rate_limit_cleanup_ttl_secs: 120,
-        }
-    }
-}
+use crate::api::error::ErrorBody;
+use crate::api::handlers::{
+    create_link, delete_link, fallback_404, get_link, healthz, list_links, readyz, redirect, slow,
+    slow_blocking, update_link, version,
+};
+use crate::api::rate_limit::RateLimitState;
+use crate::api::stats::{get_link_stats, get_top_stats};
+use crate::auth::{AuthConfig, auth_middleware, login_handler};
 
 /// Состояние приложения.
 #[derive(Clone)]
@@ -56,44 +48,127 @@ pub struct AppState {
     pub repo: Arc<dyn LinkRepository>,
     pub stats_storage: Arc<domain::stats::StatsStorage>,
     pub config: Arc<Config>,
+    pub cache: Cache,
+    pub metrics_handle: PrometheusHandle,
+    pub auth: Option<Arc<AuthConfig>>,
+    pub shutdown_token: CancellationToken,
+    pub db_pool: Option<PgPool>,
+}
+
+/// OpenAPI спецификация
+#[derive(OpenApi)]
+#[openapi(
+    info(
+        title = "Shorty API",
+        version = "1.0.0",
+        description = "Сервис сокращения ссылок с JWT-аутентификацией"
+    ),
+    components(
+        schemas(
+            ErrorBody,
+            crate::api::dto::LinkResponse,
+            crate::api::dto::CreateLinkRequest,
+            crate::api::dto::UpdateLinkRequest,
+            crate::api::dto::ListLinksResponse,
+            crate::api::stats::LinkStatsResponse,
+            crate::api::stats::TopStatsResponse,
+            crate::api::stats::TopLink,
+            crate::auth::LoginRequest,
+            crate::auth::LoginResponse,
+            crate::api::handlers::Health,
+            crate::api::handlers::Version,
+        )
+    ),
+    tags(
+        (name = "shorty", description = "Операции с короткими ссылками"),
+        (name = "auth", description = "Аутентификация"),
+        (name = "health", description = "Health check")
+    ),
+    security(
+        ("bearerAuth" = [])
+    ),
+    modifiers(&BearerAuthAddon)
+)]
+pub struct ApiDoc;
+
+struct BearerAuthAddon;
+
+impl Modify for BearerAuthAddon {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        openapi.components = Some(
+            utoipa::openapi::schema::ComponentsBuilder::new()
+                .security_scheme(
+                    "bearerAuth",
+                    utoipa::openapi::security::SecurityScheme::Http(
+                        utoipa::openapi::security::HttpBuilder::new()
+                            .scheme(utoipa::openapi::security::HttpAuthScheme::Bearer)
+                            .build(),
+                    ),
+                )
+                .build(),
+        );
+    }
 }
 
 /// Сборка приложения.
 pub fn build_router(state: AppState) -> Router {
-    let rate_limit_state = RateLimitState::new(
+    let _rate_limit_state = RateLimitState::new(
         state.config.rate_limit_capacity,
         state.config.rate_limit_period_secs,
         state.config.rate_limit_cleanup_ttl_secs,
     );
 
-    // API v1 routes с rate limiting
-    let api_v1 = Router::new()
-        .route("/links", post(api::handlers::create_link))
+    let metrics_handle = state.metrics_handle.clone();
+
+    // Публичные routes (не требуют аутентификации)
+    let public_routes = Router::new()
+        .route("/healthz", get(healthz))
+        .route("/readyz", get(readyz))
+        .route("/version", get(version))
+        .route("/auth/login", post(login_handler))
+        .route("/{code}", get(redirect))
+        .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()));
+
+    // Защищённые API routes (требуют JWT)
+    let protected_routes = Router::new()
+        .route("/links", post(create_link).get(list_links))
         .route(
             "/links/{code}",
-            get(api::handlers::get_link).delete(api::handlers::delete_link),
+            get(get_link).put(update_link).delete(delete_link),
         )
-        .route("/links/{code}/stats", get(api::stats::get_link_stats))
+        .route("/links/{code}/stats", get(get_link_stats))
+        .route("/stats/top", get(get_top_stats))
         .layer(axum::middleware::from_fn_with_state(
-            rate_limit_state.clone(),
-            rate_limit_middleware,
+            state.clone(),
+            auth_middleware,
         ));
 
     // Основной роутер
     Router::new()
-        .route("/healthz", get(api::handlers::healthz))
-        .route("/version", get(api::handlers::version))
-        .route("/slow", get(api::handlers::slow))
-        .route("/slow-blocking", get(api::handlers::slow_blocking))
-        .route("/stats/top", get(api::stats::get_top_stats))
-        .nest("/api/v1", api_v1)
-        .route("/{code}", get(api::handlers::redirect))
-        .fallback(api::handlers::fallback_404)
+        .merge(public_routes)
+        .nest("/api/v1", protected_routes)
+        .route("/slow", get(slow))
+        .route("/slow-blocking", get(slow_blocking))
+        .route(
+            "/metrics",
+            get(move || async move {
+                let payload = metrics_handle.render();
+                (
+                    [(
+                        axum::http::header::CONTENT_TYPE,
+                        HeaderValue::from_static("text/plain; version=0.0.4"),
+                    )],
+                    payload,
+                )
+            }),
+        )
+        .fallback(fallback_404)
         .layer(
             ServiceBuilder::new()
                 .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
                 .layer(axum::middleware::from_fn(request_id::request_id_scope))
                 .layer(TraceLayer::new_for_http().make_span_with(make_span))
+                .layer(axum::middleware::from_fn(http_metrics_middleware))
                 .layer(TimeoutLayer::with_status_code(
                     axum::http::StatusCode::SERVICE_UNAVAILABLE,
                     state.config.request_timeout,
@@ -116,4 +191,67 @@ fn make_span(req: &axum::extract::Request) -> tracing::Span {
         uri = %req.uri(),
         request_id = %request_id,
     )
+}
+
+#[tracing::instrument(skip_all)]
+async fn http_metrics_middleware(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let method = req.method().clone();
+    let route = route_template(req.uri().path());
+    let start = std::time::Instant::now();
+
+    let response = next.run(req).await;
+
+    let latency = start.elapsed().as_secs_f64();
+    let status = response.status().as_u16().to_string();
+
+    metrics::counter!("http_requests_total", "method" => method.to_string(), "route" => route.clone(), "status" => status).increment(1);
+    metrics::histogram!("http_request_duration_seconds", "method" => method.to_string(), "route" => route).record(latency);
+
+    response
+}
+
+fn route_template(path: &str) -> String {
+    if path.starts_with("/api/v1/links/") && path.len() > 14 {
+        if path.matches('/').count() == 3 {
+            return "/api/v1/links/{code}".to_string();
+        }
+        if path == "/api/v1/links" || path == "/api/v1/links/" {
+            return "/api/v1/links".to_string();
+        }
+    }
+    if path == "/healthz" {
+        return "/healthz".to_string();
+    }
+    if path == "/version" {
+        return "/version".to_string();
+    }
+    if path == "/slow" {
+        return "/slow".to_string();
+    }
+    if path == "/slow-blocking" {
+        return "/slow-blocking".to_string();
+    }
+    if path == "/stats/top" {
+        return "/stats/top".to_string();
+    }
+    if path == "/metrics" {
+        return "/metrics".to_string();
+    }
+    if path.starts_with("/api/v1/links/") && path.ends_with("/stats") {
+        return "/api/v1/links/{code}/stats".to_string();
+    }
+    if path.len() > 1 && !path.starts_with('/') {
+        return "/{code}".to_string();
+    }
+    if path.len() > 1
+        && path
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return "/{code}".to_string();
+    }
+    path.to_string()
 }

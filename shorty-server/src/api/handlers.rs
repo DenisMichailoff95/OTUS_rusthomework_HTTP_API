@@ -1,9 +1,6 @@
 //! Обработчики HTTP запросов.
-//!
-//! Каждый handler отвечает за конкретный endpoint и
-//! делегирует логику в доменный слой через хранилище.
 
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 use axum::{
     Json,
@@ -13,30 +10,39 @@ use axum::{
 };
 use domain::{RepoError, ShortLink};
 use serde::Serialize;
+use storage::link_key;
+use utoipa::ToSchema;
 
 use super::{
     dto::{
-        CreateLinkRequest, LinkResponse, expires_at_from_ttl, parse_target_url,
-        validate_custom_code,
+        CreateLinkRequest, LinkResponse, ListLinksResponse, UpdateLinkRequest, expires_at_from_ttl,
+        parse_target_url, unix_secs, validate_custom_code,
     },
-    error::{AppError, AppJson},
+    error::{AppError, AppJson, ErrorBody},
 };
 use crate::AppState;
+
+use base64::Engine;
 
 // ---------------------------------------------------------------------------
 // CRUD операции со ссылками
 // ---------------------------------------------------------------------------
 
-/// Создание новой короткой ссылки.
-///
-/// Если `custom_code` не указан, генерируется автоматически.
-/// При указании `ttl_seconds` ссылка будет автоматически удалена
-/// фоновым процессом после истечения срока.
-///
-/// # Ошибки
-/// - 409 - код уже занят
-/// - 422 - невалидный URL или код
-/// - 429 - превышен rate limit
+/// Создать новую короткую ссылку.
+#[utoipa::path(
+    post,
+    path = "/api/v1/links",
+    tags = ["shorty"],
+    request_body = CreateLinkRequest,
+    responses(
+        (status = 201, description = "Ссылка создана", body = LinkResponse),
+        (status = 400, description = "Некорректный запрос", body = ErrorBody),
+        (status = 401, description = "Требуется аутентификация", body = ErrorBody),
+        (status = 409, description = "Код уже занят", body = ErrorBody),
+        (status = 503, description = "БД недоступна", body = ErrorBody),
+    ),
+    security(("bearerAuth" = []))
+)]
 pub async fn create_link(
     State(state): State<AppState>,
     AppJson(req): AppJson<CreateLinkRequest>,
@@ -61,21 +67,155 @@ pub async fn create_link(
     ))
 }
 
-/// Получение метаданных ссылки.
-///
-/// Возвращает информацию о ссылке включая количество переходов.
+/// Обновить ссылку с optimistic locking.
+#[utoipa::path(
+    put,
+    path = "/api/v1/links/{code}",
+    tags = ["shorty"],
+    params(
+        ("code" = String, Path, description = "Код ссылки")
+    ),
+    request_body = UpdateLinkRequest,
+    responses(
+        (status = 200, description = "Ссылка обновлена", body = LinkResponse),
+        (status = 400, description = "Некорректный запрос", body = ErrorBody),
+        (status = 401, description = "Требуется аутентификация", body = ErrorBody),
+        (status = 403, description = "Доступ запрещён", body = ErrorBody),
+        (status = 404, description = "Ссылка не найдена", body = ErrorBody),
+        (status = 409, description = "Конфликт версий", body = ErrorBody),
+        (status = 503, description = "БД недоступна", body = ErrorBody),
+    ),
+    security(("bearerAuth" = []))
+)]
+pub async fn update_link(
+    State(state): State<AppState>,
+    Path(code): Path<String>,
+    AppJson(req): AppJson<UpdateLinkRequest>,
+) -> Result<Json<LinkResponse>, AppError> {
+    let target_url = parse_target_url(&req.target_url)?;
+    let link = state
+        .repo
+        .update(&code, target_url.as_str(), req.version)
+        .await?;
+
+    state.cache.invalidate(&link_key(&code)).await;
+
+    Ok(Json(LinkResponse {
+        code: link.code,
+        target_url: link.target_url,
+        created_at_unix: unix_secs(link.created_at),
+        expires_at_unix: link.expires_at.map(unix_secs),
+        hits: 0,
+        version: link.version,
+    }))
+}
+
+/// Получить ссылку по коду (с кешированием).
+#[utoipa::path(
+    get,
+    path = "/api/v1/links/{code}",
+    tags = ["shorty"],
+    params(
+        ("code" = String, Path, description = "Код ссылки")
+    ),
+    responses(
+        (status = 200, description = "Ссылка найдена", body = LinkResponse),
+        (status = 401, description = "Требуется аутентификация", body = ErrorBody),
+        (status = 403, description = "Доступ запрещён", body = ErrorBody),
+        (status = 404, description = "Ссылка не найдена", body = ErrorBody),
+        (status = 503, description = "БД недоступна", body = ErrorBody),
+    ),
+    security(("bearerAuth" = []))
+)]
 pub async fn get_link(
     State(state): State<AppState>,
     Path(code): Path<String>,
 ) -> Result<Json<LinkResponse>, AppError> {
+    let key = link_key(&code);
+
+    if let Some(cached) = state.cache.get::<LinkResponse>(&key).await {
+        tracing::debug!(code = %code, "cache hit");
+        return Ok(Json(cached));
+    }
+
+    tracing::debug!(code = %code, "cache miss");
+
     let stats = state.repo.stats(&code).await?;
-    Ok(Json(stats.into()))
+    let response: LinkResponse = stats.into();
+
+    state.cache.set(&key, &response).await;
+
+    Ok(Json(response))
 }
 
-/// Редирект по короткому коду.
-///
-/// Автоматически инкрементирует счетчик переходов.
-/// Возвращает 307 Temporary Redirect для сохранения метода запроса.
+/// Получить список ссылок с keyset-пагинацией.
+#[utoipa::path(
+    get,
+    path = "/api/v1/links",
+    tags = ["shorty"],
+    params(
+        ("limit" = Option<u64>, Query, description = "Лимит страницы (макс 100)"),
+        ("cursor" = Option<String>, Query, description = "Курсор для пагинации")
+    ),
+    responses(
+        (status = 200, description = "Список ссылок", body = ListLinksResponse),
+        (status = 401, description = "Требуется аутентификация", body = ErrorBody),
+        (status = 403, description = "Доступ запрещён", body = ErrorBody),
+        (status = 503, description = "БД недоступна", body = ErrorBody),
+    ),
+    security(("bearerAuth" = []))
+)]
+pub async fn list_links(
+    State(state): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<ListLinksResponse>, AppError> {
+    let limit = params
+        .get("limit")
+        .and_then(|l| l.parse::<u64>().ok())
+        .unwrap_or(20)
+        .min(100);
+
+    let cursor = params.get("cursor").and_then(|c| {
+        let decoded = base64::engine::general_purpose::STANDARD_NO_PAD
+            .decode(c)
+            .ok()?;
+        let decoded_str = String::from_utf8(decoded).ok()?;
+        serde_json::from_str::<(String, String)>(&decoded_str).ok()
+    });
+
+    let (links, next_cursor) = state
+        .repo
+        .list(
+            limit,
+            cursor.as_ref().map(|(a, b)| (a.as_str(), b.as_str())),
+        )
+        .await?;
+
+    let response = ListLinksResponse {
+        links: links.into_iter().map(LinkResponse::from).collect(),
+        next_cursor: next_cursor.map(|(ts, code)| {
+            let json = serde_json::to_string(&(ts, code)).unwrap();
+            base64::engine::general_purpose::STANDARD_NO_PAD.encode(json)
+        }),
+    };
+
+    Ok(Json(response))
+}
+
+/// Редирект по короткому коду (публичный).
+#[utoipa::path(
+    get,
+    path = "/{code}",
+    tags = ["shorty"],
+    params(
+        ("code" = String, Path, description = "Код ссылки")
+    ),
+    responses(
+        (status = 302, description = "Редирект на целевой URL"),
+        (status = 404, description = "Ссылка не найдена", body = ErrorBody),
+        (status = 503, description = "БД недоступна", body = ErrorBody),
+    )
+)]
 pub async fn redirect(
     State(state): State<AppState>,
     Path(code): Path<String>,
@@ -85,27 +225,46 @@ pub async fn redirect(
         return Err(AppError::NotFound);
     }
     state.repo.record_hit(&code).await?;
+
+    // Инвалидируем кеш после обновления счетчика
+    state.cache.invalidate(&link_key(&code)).await;
+
     Ok((
         StatusCode::TEMPORARY_REDIRECT,
         [(header::LOCATION, link.target_url)],
     ))
 }
 
-/// Удаление ссылки.
-///
-/// # Контракт
-/// - 204 - успешное удаление
-/// - 404 - ссылка не найдена
+/// Удалить ссылку.
+#[utoipa::path(
+    delete,
+    path = "/api/v1/links/{code}",
+    tags = ["shorty"],
+    params(
+        ("code" = String, Path, description = "Код ссылки")
+    ),
+    responses(
+        (status = 204, description = "Ссылка удалена"),
+        (status = 401, description = "Требуется аутентификация", body = ErrorBody),
+        (status = 403, description = "Доступ запрещён", body = ErrorBody),
+        (status = 404, description = "Ссылка не найдена", body = ErrorBody),
+        (status = 503, description = "БД недоступна", body = ErrorBody),
+    ),
+    security(("bearerAuth" = []))
+)]
 pub async fn delete_link(
     State(state): State<AppState>,
     Path(code): Path<String>,
 ) -> Result<StatusCode, AppError> {
     state.repo.remove(&code).await?;
+
+    // Инвалидируем кеш после удаления
+    state.cache.invalidate(&link_key(&code)).await;
+
     Ok(StatusCode::NO_CONTENT)
 }
 
 /// Обработчик для неизвестных путей.
-/// Возвращает 404 в едином формате ошибок.
 pub async fn fallback_404() -> AppError {
     AppError::NotFound
 }
@@ -114,9 +273,6 @@ pub async fn fallback_404() -> AppError {
 // Вспомогательные функции
 // ---------------------------------------------------------------------------
 
-/// Генерация уникального кода с повторными попытками.
-///
-/// Использует атомарную операцию вставки для проверки занятости.
 async fn generate_code(
     state: &AppState,
     target_url: &str,
@@ -136,7 +292,6 @@ async fn generate_code(
     )))
 }
 
-/// Атомарная вставка ссылки с проверкой занятости кода.
 async fn insert_link(
     state: &AppState,
     code: &str,
@@ -148,7 +303,6 @@ async fn insert_link(
         .map_err(Into::into)
 }
 
-/// Внутренняя функция атомарной вставки.
 async fn try_insert_link(
     state: &AppState,
     code: &str,
@@ -166,41 +320,84 @@ async fn try_insert_link(
 // Технические эндпоинты
 // ---------------------------------------------------------------------------
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct Health {
-    status: &'static str,
+    pub status: &'static str,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct Version {
-    version: &'static str,
+    pub version: &'static str,
 }
 
-/// Проверка работоспособности сервиса.
+/// Health check эндпоинт (публичный).
+#[utoipa::path(
+    get,
+    path = "/healthz",
+    tags = ["health"],
+    responses(
+        (status = 200, description = "Сервис жив", body = Health)
+    )
+)]
 pub async fn healthz() -> Json<Health> {
     Json(Health { status: "ok" })
 }
 
-/// Версия сервиса из Cargo.toml.
+/// Readiness check эндпоинт (публичный).
+#[utoipa::path(
+    get,
+    path = "/readyz",
+    tags = ["health"],
+    responses(
+        (status = 200, description = "Сервис готов"),
+        (status = 503, description = "Сервис не готов")
+    )
+)]
+pub async fn readyz(State(state): State<AppState>) -> axum::http::StatusCode {
+    if state.shutdown_token.is_cancelled() {
+        return axum::http::StatusCode::SERVICE_UNAVAILABLE;
+    }
+
+    if let Some(pool) = &state.db_pool {
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            sqlx::query("SELECT 1").execute(pool),
+        )
+        .await
+        {
+            Ok(Ok(_)) => return axum::http::StatusCode::OK,
+            _ => return axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        }
+    }
+
+    axum::http::StatusCode::OK
+}
+
+/// Версия сервиса (публичный).
+#[utoipa::path(
+    get,
+    path = "/version",
+    tags = ["health"],
+    responses(
+        (status = 200, description = "Версия сервиса", body = Version)
+    )
+)]
 pub async fn version() -> Json<Version> {
     Json(Version {
         version: env!("CARGO_PKG_VERSION"),
     })
 }
 
-/// Демонстрация корректной обработки блокирующих операций.
 pub async fn slow() -> &'static str {
     tokio::task::spawn_blocking(|| {
-        std::thread::sleep(Duration::from_secs(2));
+        std::thread::sleep(std::time::Duration::from_secs(2));
     })
     .await
     .expect("blocking task panicked");
     "done: spawn_blocking kept workers free\n"
 }
 
-/// Демонстрация НЕПРАВИЛЬНОЙ обработки блокирующих операций.
-/// Этот метод блокирует поток выполнения и не должен использоваться в продакшене.
 pub async fn slow_blocking() -> &'static str {
-    std::thread::sleep(Duration::from_secs(2));
+    std::thread::sleep(std::time::Duration::from_secs(2));
     "done: but a worker thread was blocked for 2s!\n"
 }

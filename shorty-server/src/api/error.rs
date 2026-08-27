@@ -1,8 +1,4 @@
 //! Единый слой ошибок API.
-//!
-//! Все ошибки в сервисе преобразуются в этот тип и возвращаются
-//! в едином JSON формате. Это обеспечивает консистентность API
-//! и упрощает обработку ошибок на клиенте.
 
 use axum::{
     Json,
@@ -11,67 +7,85 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 use crate::request_id::current_request_id;
 
+/// Стандартное тело ошибки для всех ответов.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ErrorBody {
+    /// Машиночитаемый код ошибки
+    #[schema(example = "not_found")]
+    pub code: String,
+    /// Человекочитаемое сообщение об ошибке
+    #[schema(example = "resource not found")]
+    pub message: String,
+    /// Идентификатор запроса для трассировки в логах
+    #[schema(example = "550e8400-e29b-41d4-a716-446655440000")]
+    pub request_id: Option<String>,
+    /// Детали валидации (опционально)
+    #[schema(example = json!([{"field": "target_url", "issue": "required"}]))]
+    pub details: Option<Vec<FieldError>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct FieldError {
+    /// Имя проблемного поля
+    #[schema(example = "target_url")]
+    pub field: String,
+    /// Описание проблемы
+    #[schema(example = "required")]
+    pub issue: String,
+}
+
 /// Ошибка уровня приложения.
-///
-/// Каждый вариант ошибки маппится на HTTP статус и JSON-тело.
-/// Внутренние детали ошибок (например, паники) никогда не утекают
-/// наружу в ответе, только в логи.
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
-    /// Ресурс не найден → 404.
     #[error("resource not found")]
     NotFound,
 
-    /// Код ссылки занят → 409.
     #[error("code is already taken")]
     CodeTaken,
 
-    /// Семантически невалидные данные → 422.
-    #[error("{0}")]
-    Validation(String),
+    #[error("version conflict")]
+    VersionConflict,
 
-    /// Отказ extractor'а (битый JSON, лишние поля) → статус из rejection.
+    #[error("storage unavailable")]
+    Unavailable,
+
+    #[error("{message}")]
+    Validation {
+        message: String,
+        details: Vec<FieldError>,
+    },
+
     #[error("{message}")]
     InvalidBody { status: StatusCode, message: String },
 
-    /// Превышен rate limit → 429 с заголовком Retry-After.
     #[error("rate limit exceeded, retry after {retry_after} seconds")]
     RateLimitExceeded { retry_after: u64 },
 
-    /// Внутренняя ошибка → 500.
-    /// Детали уходят только в лог, клиенту возвращается общее сообщение.
     #[error("internal error")]
     Internal(#[from] anyhow::Error),
 }
 
-/// Стандартное тело ошибки для всех ответов.
-///
-/// Все ошибки возвращаются в этом формате, что делает API предсказуемым
-/// и упрощает обработку ошибок на клиенте.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ErrorBody {
-    /// Машиночитаемый код ошибки (например, "not_found", "rate_limit_exceeded")
-    pub code: String,
-    /// Человекочитаемое сообщение об ошибке
-    pub message: String,
-    /// Идентификатор запроса для трассировки в логах
-    pub request_id: Option<String>,
-}
-
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        // Получаем request_id из task-local хранилища
-        // Это позволяет нам добавлять id в тело ошибки без явной передачи
-        // через все handlers
         let request_id = current_request_id();
 
-        let (status, code) = match &self {
-            AppError::NotFound => (StatusCode::NOT_FOUND, "not_found"),
-            AppError::CodeTaken => (StatusCode::CONFLICT, "code_taken"),
-            AppError::Validation(_) => (StatusCode::UNPROCESSABLE_ENTITY, "validation_error"),
+        let (status, code, details) = match &self {
+            AppError::NotFound => (StatusCode::NOT_FOUND, "not_found", None),
+            AppError::CodeTaken => (StatusCode::CONFLICT, "code_taken", None),
+            AppError::VersionConflict => (StatusCode::CONFLICT, "version_conflict", None),
+            AppError::Unavailable => (StatusCode::SERVICE_UNAVAILABLE, "unavailable", None),
+            AppError::Validation {
+                message: _,
+                details,
+            } => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "validation_error",
+                Some(details.clone()),
+            ),
             AppError::InvalidBody { status, .. } => (
                 *status,
                 match *status {
@@ -80,8 +94,8 @@ impl IntoResponse for AppError {
                     StatusCode::UNPROCESSABLE_ENTITY => "validation_error",
                     _ => "bad_request",
                 },
+                None,
             ),
-            // Для rate limit добавляем заголовок Retry-After
             AppError::RateLimitExceeded { retry_after } => {
                 return (
                     StatusCode::TOO_MANY_REQUESTS,
@@ -90,15 +104,14 @@ impl IntoResponse for AppError {
                         code: "rate_limit_exceeded".to_string(),
                         message: format!("rate limit exceeded, retry after {retry_after} seconds"),
                         request_id,
+                        details: None,
                     }),
                 )
                     .into_response();
             }
-            // Внутренние ошибки логируем с полным стеком, но клиенту
-            // отдаем только общее сообщение
             AppError::Internal(err) => {
                 tracing::error!(error = ?err, request_id = ?request_id, "internal error");
-                (StatusCode::INTERNAL_SERVER_ERROR, "internal")
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal", None)
             }
         };
 
@@ -106,24 +119,24 @@ impl IntoResponse for AppError {
             code: code.to_string(),
             message: self.to_string(),
             request_id,
+            details,
         };
         (status, Json(body)).into_response()
     }
 }
 
-/// Преобразование ошибок репозитория в ошибки API.
 impl From<domain::RepoError> for AppError {
     fn from(err: domain::RepoError) -> Self {
         match err {
             domain::RepoError::NotFound(_) => AppError::NotFound,
             domain::RepoError::CodeTaken(_) => AppError::CodeTaken,
+            domain::RepoError::VersionConflict => AppError::VersionConflict,
+            domain::RepoError::Unavailable => AppError::Unavailable,
+            domain::RepoError::Internal(_) => AppError::Internal(anyhow::anyhow!("internal error")),
         }
     }
 }
 
-/// Обёртка для JSON с кастомной ошибкой.
-///
-/// Позволяет преобразовывать ошибки десериализации axum в наш формат.
 pub struct AppJson<T>(pub T);
 
 impl<S, T> FromRequest<S> for AppJson<T>

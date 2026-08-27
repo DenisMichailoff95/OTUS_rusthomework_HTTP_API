@@ -14,7 +14,8 @@ use shorty_server::{
     api::{dto::LinkResponse, error::ErrorBody},
     build_router,
 };
-use storage::InMemoryRepo;
+use storage::{Cache, InMemoryRepo};
+use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 
 fn test_state() -> (AppState, Arc<InMemoryRepo>) {
@@ -28,6 +29,11 @@ fn test_state() -> (AppState, Arc<InMemoryRepo>) {
         repo: repo.clone(),
         stats_storage: stats_storage.clone(),
         config: Arc::new(config),
+        cache: Cache::disabled(),
+        metrics_handle: storage::telemetry::init_metrics(),
+        auth: None,
+        shutdown_token: CancellationToken::new(),
+        db_pool: None,
     };
     (state, repo)
 }
@@ -342,42 +348,43 @@ async fn oversized_body_is_413_in_unified_format() {
 }
 
 // ---------------------------------------------------------------------------
-// 5. Rate Limiting - просто проверяем что работает
+// 5. Rate Limiting - проверяем что middleware корректно отклоняет запросы
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn rate_limit_works() {
-    // Создаем app с обычным лимитом
-    let repo = Arc::new(InMemoryRepo::new());
-    let stats_storage = Arc::new(domain::stats::StatsStorage::new());
-    let config = Arc::new(Config::default());
-    let state = AppState {
-        repo: repo.clone(),
-        stats_storage: stats_storage.clone(),
-        config: config.clone(),
-    };
-    let app = build_router(state);
+async fn rate_limit_middleware_rejects_after_capacity() {
+    use shorty_server::api::rate_limit::RateLimitState;
 
-    // Отправляем несколько запросов
-    let mut results = Vec::new();
-    for i in 0..15 {
-        let response = app
-            .clone()
-            .oneshot(post_json(
-                "/api/v1/links",
-                serde_json::json!({
-                    "target_url": format!("https://example.com/r{}", i),
-                    "custom_code": format!("rl{}", i)
-                }),
-            ))
-            .await
-            .unwrap();
-        results.push(response.status());
+    let rate_limit_state = RateLimitState::new(3, 60, 120);
+    let app = axum::Router::new()
+        .route("/test", axum::routing::get(|| async { "ok" }))
+        .layer(axum::middleware::from_fn_with_state(
+            rate_limit_state.clone(),
+            shorty_server::api::rate_limit::rate_limit_middleware,
+        ))
+        .with_state(rate_limit_state);
+
+    let client_id = "rate-limit-test-client";
+    let req = |id: &str| {
+        axum::http::Request::builder()
+            .uri("/test")
+            .header("x-api-key", id)
+            .body(axum::body::Body::empty())
+            .unwrap()
+    };
+
+    for i in 0..3 {
+        let resp = app.clone().oneshot(req(client_id)).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            axum::http::StatusCode::OK,
+            "Request {} should pass",
+            i + 1
+        );
     }
 
-    // Проверяем что хотя бы один запрос был отклонен (лимит 10 в минуту)
-    let has_429 = results.iter().any(|&s| s == StatusCode::TOO_MANY_REQUESTS);
-    assert!(has_429, "Should have at least one rate limited request");
+    let resp = app.oneshot(req(client_id)).await.unwrap();
+    assert_eq!(resp.status(), axum::http::StatusCode::TOO_MANY_REQUESTS);
 }
 
 // ---------------------------------------------------------------------------
