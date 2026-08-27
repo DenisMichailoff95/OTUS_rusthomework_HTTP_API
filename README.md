@@ -1,6 +1,40 @@
-# Shorty — Сервис сокращения ссылок (ДЗ 2)
+# Shorty — Полипротокольный backend сокращения ссылок (ДЗ 3)
 
-Production-приближенный HTTP-сервис сокращения URL с PostgreSQL, Redis-кешем и observability.
+Production-приближенный сервис сокращения URL с REST API, gRPC, PostgreSQL, Redis-кешем, JWT-аутентификацией и observability.
+
+## Архитектурные решения
+
+### Транспортный слой
+
+Сервис exposes два протокола в одном процессе:
+- **HTTP** (axum) — REST API на `/api/v1/*` + публичные эндпоинты (`/healthz`, `/version`, `/auth/login`, `/{code}` для редиректа)
+- **gRPC** (tonic) — порт 50051, reflection + health checking
+
+Доменный слой (`crates/domain`) и хранилище (`crates/storage`) полностью разделены от транспорта. Оба протокола используют те же `LinkRepository`, `ShortLink`, `LinkStats` — бизнес-логика не продублирована.
+
+### Protobuf-контракт
+
+Контракт лежит в `proto/shorty/v1/shorty.proto` (пакет `shorty.v1`). Описаны 4 метода:
+- `GetLink` — получение по коду
+- `CreateLink` — создание
+- `ListLinks` — список с cursor-пагинацией (`page_size` + `page_token`)
+- `StreamLinks` — server-streaming подписка на события
+
+Все временные поля используют `google.protobuf.Timestamp`. Enum `LinkEventType` имеет нулевое значение `LINK_EVENT_TYPE_UNSPECIFIED`.
+
+### Аутентификация и авторизация
+
+- **JWT** подпись RSA (`RS256`) через асимметричные ключи. Поддерживается `kid` в заголовке (заготовка под ротацию ключей).
+- **HTTP**: middleware проверяет `Authorization: Bearer <token>` на всех защищённых routes (`/api/v1/*`). Публичные routes: health, login, swagger-ui, openapi.json, редирект.
+- **gRPC**: интерцептор извлекает Bearer-токен из metadata `authorization` и валидирует той же функцией, что и HTTP.
+- Валидация: фиксированный алгоритм, `exp` обязателен, проверяются `iss` и `aud`. Ошибки → единый формат `ErrorBody` без раскрытия деталей.
+
+### OpenAPI и Swagger UI
+
+- Все handlers помечены `#[utoipa::path(...)]` с полным описанием параметров, тел и статусов ответов.
+- DTO deriv `ToSchema` с примерами через `#[schema(example = ...)]`.
+- Спецификация доступна по `/api-docs/openapi.json`.
+- Swagger UI по `/swagger-ui` с поддержкой Authorize (Bearer JWT).
 
 ## Быстрый старт
 
@@ -9,46 +43,85 @@ Production-приближенный HTTP-сервис сокращения URL �
 git clone <repository-url>
 cd OTUS_rusthomework_HTTP_API
 
-# 2. Поднять инфраструктуру
+# 2. Сгенерировать JWT-ключи (если ещё не сгенерированы)
+chmod +x scripts/gen-keys.sh
+./scripts/gen-keys.sh
+
+# 3. Поднять инфраструктуру
 docker compose up -d
 
-# 3. Собрать проект (offline-режим, .sqlx/ закоммичен)
-SQLX_OFFLINE=true cargo build --workspace
+# 4. Собрать проект
+cargo build --workspace
 
-# 4. Запустить сервис
-STORAGE_TYPE=postgres DATABASE_URL=postgres://postgres:postgres@localhost:5499/shorty REDIS_URL=redis://localhost:6379 cargo run --package shorty-server
+# 5. Запустить сервис (HTTP на 8080, gRPC на 50051)
+cargo run --package shorty-server
 ```
 
-### Переменные окружения
-
-См. `.env.example`:
+## Переменные окружения
 
 ```env
+# Хранилище
 STORAGE_TYPE=postgres
 DATABASE_URL=postgres://postgres:postgres@localhost:5499/shorty
 REDIS_URL=redis://localhost:6379
+
+# Сеть
 LISTEN_ADDR=0.0.0.0:8080
-LOG_FORMAT=json
+GRPC_LISTEN_ADDR=0.0.0.0:50051
+
+# Аутентификация (опционально, по умолчанию включена)
+DISABLE_AUTH=1                    # отключить JWT
+AUTH_ISSUER=shorty-service
+AUTH_AUDIENCE=shorty-api
+AUTH_TTL_SECS=900                 # 15 минут
+AUTH_PRIVATE_KEY_PATH=./keys/jwt_private.pem
+AUTH_PUBLIC_KEY_PATH=./keys/jwt_public.pem
+
+# Кеш
 CACHE_TTL_SECS=60
 CACHE_JITTER_SECS=10
 CACHE_OP_TIMEOUT_MS=300
+
+# Логирование
 RUST_LOG=info,sqlx=warn
+LOG_FORMAT=json
 ```
 
-## API
+## Получение токена
+
+```bash
+curl -X POST http://localhost:8080/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"admin","password":"admin"}'
+```
+
+Ответ:
+```json
+{
+  "access_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "token_type": "Bearer",
+  "expires_in": 900
+}
+```
+
+## REST API
+
+Все защищённые эндпоинты требуют заголовок `Authorization: Bearer <token>`.
 
 ### Создание ссылки
 
 ```bash
 curl -X POST http://localhost:8080/api/v1/links \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
   -d '{"target_url":"https://example.com","custom_code":"promo2026","ttl_seconds":3600}'
 ```
 
 ### Получение ссылки
 
 ```bash
-curl http://localhost:8080/api/v1/links/promo2026
+curl http://localhost:8080/api/v1/links/promo2026 \
+  -H "Authorization: Bearer $TOKEN"
 ```
 
 ### Обновление ссылки (optimistic locking)
@@ -56,23 +129,28 @@ curl http://localhost:8080/api/v1/links/promo2026
 ```bash
 curl -X PUT http://localhost:8080/api/v1/links/promo2026 \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
   -d '{"target_url":"https://example.com/updated","version":1}'
 ```
 
 ### Удаление ссылки
 
 ```bash
-curl -X DELETE http://localhost:8080/api/v1/links/promo2026
+curl -X DELETE http://localhost:8080/api/v1/links/promo2026 \
+  -H "Authorization: Bearer $TOKEN"
 ```
 
-### Листинг ссылок (keyset pagination)
+### Листинг ссылок (cursor-пагинация)
 
 ```bash
-curl "http://localhost:8080/api/v1/links?limit=20"
-curl "http://localhost:8080/api/v1/links?limit=20&cursor=<next_cursor>"
+curl "http://localhost:8080/api/v1/links?limit=20" \
+  -H "Authorization: Bearer $TOKEN"
+
+curl "http://localhost:8080/api/v1/links?limit=20&cursor=<next_cursor>" \
+  -H "Authorization: Bearer $TOKEN"
 ```
 
-### Редирект
+### Редирект (публичный)
 
 ```bash
 curl -I http://localhost:8080/promo2026
@@ -84,75 +162,120 @@ curl -I http://localhost:8080/promo2026
 curl http://localhost:8080/metrics
 ```
 
-## Схема ключей кеша
-
-| Ключ | Описание |
-|------|----------|
-| `shorty:v1:link:{code}` | Данные ссылки в JSON с TTL 60с ± 10с jitter |
-
-Сериализация: JSON. TTL: 60 секунд с jitter ±10 секунд для предотвращения массового истечения (thundering herd).
-
-## Consistency
-
-При успешном `PUT`/`DELETE` инвалидация кеша происходит **после коммита транзакции** в PostgreSQL. Порядок «сначала БД, потом кеш» исключает потерю актуальности данных.
-
-Окно stale-данных ограничено TTL кеша (максимум 70 секунд при максимальном jitter). При остановке Redis сервис продолжает отвечать из PostgreSQL с warn-логом, что обеспечивает graceful degradation.
-
-## Архитектурные решения
-
-### Первичный ключ
-
-Используется `UUID` (`gen_random_uuid()`) как PRIMARY KEY. Обоснование: распределённая генерация без координации, безопасность (неPredictable), совместимость с микросервисной архитектурой.
-
-### Пагинация
-
-Keyset (cursor) пагинация по `(created_at DESC, code DESC)`. Курсор — opaque base64-encoded JSON строка. Обоснование: стабильность при вставках между страницами, отсутствие проблем с пропуском/дублированием записей, что характерно для `OFFSET`.
-
-### TTL кеша
-
-TTTL 60 секунд с jitter ±10 секунд. Обоснование: достаточно для снижения нагрузки на БД при горячих чтениях, но ограничивает окно неактуальности данных. Jitter предотвращает simultaneous expiry (stampede).
-
-### Индексы
-
-- `idx_links_code` — уникальный поиск по коду (основной запрос `GET /links/{code}`)
-- `idx_links_created_at_id` — keyset пагинация по дате создания
-- `idx_links_expires_at` — очистка просроченных ссылок (`purge_expired`)
-
-## Миграции
-
-Миграции применяются автоматически при старте сервиса через `sqlx::migrate!`. Каталог `migrations/`.
+### Health и Version (публичные)
 
 ```bash
-# Применить миграции вручную
-DATABASE_URL=postgres://postgres:postgres@localhost:5499/shorty cargo sqlx migrate run --source crates/storage/migrations
+curl http://localhost:8080/healthz
+curl http://localhost:8080/version
 ```
+
+## gRPC API
+
+Сервер слушает на `0.0.0.0:50051`.
+
+### Примеры вызовов через grpcurl
+
+```bash
+# Получить ссылку по коду
+grpcurl -plaintext -d '{"code":"promo2026"}' \
+  localhost:50051 shorty.v1.ShortyService/GetLink
+
+# Создать ссылку
+grpcurl -plaintext -d '{"target_url":"https://example.com","custom_code":"grpc-demo","ttl_seconds":3600}' \
+  localhost:50051 shorty.v1.ShortyService/CreateLink
+
+# Список ссылок
+grpcurl -plaintext -d '{"page_size":10}' \
+  localhost:50051 shorty.v1.ShortyService/ListLinks
+
+# Server-streaming подписка
+grpcurl -plaintext -d '{"batch_size":5}' \
+  localhost:50051 shorty.v1.ShortyService/StreamLinks
+```
+
+### Аутентификация в gRPC
+
+```bash
+# С токеном
+grpcurl -H "authorization: Bearer $TOKEN" \
+  -plaintext -d '{"code":"promo2026"}' \
+  localhost:50051 shorty.v1.ShortyService/GetLink
+
+# Без токена (вернёт Unauthenticated)
+grpcurl -plaintext -d '{"code":"promo2026"}' \
+  localhost:50051 shorty.v1.ShortyService/GetLink
+```
+
+### Reflection
+
+Сервис исследуем через `grpcui` или `grpcurl` без локальных `.proto` файлов:
+
+```bash
+grpcurl -plaintext localhost:50051 list
+grpcui -plaintext localhost:50051
+```
+
+## Swagger UI
+
+Открыть: http://localhost:8080/swagger-ui
+
+1. Нажать кнопку **Authorize**
+2. Вставить токен в формате `Bearer <access_token>`
+3. Выполнять запросы напрямую из интерфейса
+
+## Генерация ключей
+
+```bash
+# Сгенерировать ES256 ключи (рекомендуется)
+openssl ecparam -genkey -name prime256v1 -out keys/jwt_private.pem
+openssl ec -in keys/jwt_private.pem -pubout -out keys/jwt_public.pem
+
+# Или RSA ключи
+openssl genpkey -algorithm RSA -out keys/jwt_private.pem -pkeyopt rsa_keygen_bits:2048
+openssl rsa -in keys/jwt_private.pem -pubout -out keys/jwt_public.pem
+```
+
+> Приватные ключи не закоммичены в репозиторий (см. `.gitignore`). Для локального запуска используйте `scripts/gen-keys.sh`.
 
 ## Тестирование
 
 ```bash
 # Unit и HTTP-тесты (без инфраструктуры)
-SQLX_OFFLINE=true cargo test --workspace
+cargo test --workspace
 
-# Интеграционные тесты с PostgreSQL (требует docker compose up -d)
+# Security-тесты (негативные сценарии JWT)
+cargo test --test security
+
+# Snapshot-тест OpenAPI (обновить: UPDATE_SNAPSHOT=1)
+cargo test --test openapi_snapshot -- --ignored
+UPDATE_SNAPSHOT=1 cargo test --test openapi_snapshot -- --ignored
+
+# Интеграционные тесты gRPC (требует запущенный сервер)
+cargo run --package shorty-server &
+cargo test --test grpc_integration -- --ignored
+
+# Интеграционные тесты PostgreSQL (требует docker compose up -d)
 cargo test --test postgres_integration -- --ignored
 ```
 
-Интеграционные тесты покрывают:
-- Happy-path CRUD
-- 404 для несуществующей ссылки
-- Конфликт optimistic locking (409)
-- Корректность инвалидации кеша после `PUT`
+### Security-тесты
 
-## Observability
+- Без токена → 401
+- С истёкшим токеном → 401
+- С неверной подписью → 401
+- С неверным `aud` → 401
+- Валидный токен → 200
 
-- **Tracing**: `tracing` + `tracing-subscriber` с `EnvFilter` (`RUST_LOG`). Поддержка JSON-формата (`LOG_FORMAT=json`).
-- **Request ID**: `x-request-id` генерируется или принимается из запроса, добавляется в корневой span и заголовок ответа.
-- **Metrics**: Prometheus exporter на `/metrics`. Счётчики `http_requests_total{method, route, status}`, гистограмма `http_request_duration_seconds{method, route}`, `cache_hits_total`, `cache_misses_total`, gauge пула БД.
+### gRPC-тесты
 
-## Сборка
+- Успешный вызов с токеном
+- Unauthenticated без токена
+- NotFound для несуществующего ID
+
+## Сборка и проверки
 
 ```bash
-# Проверка формата
+# Форматирование
 cargo fmt -- --check
 
 # Lint
@@ -161,6 +284,16 @@ cargo clippy --workspace -- -D warnings
 # Сборка (требует .sqlx/ в репозитории)
 SQLX_OFFLINE=true cargo build --workspace
 ```
+
+## Миграции
+
+Миграции применяются автоматически при старте сервиса через `sqlx::migrate!`. Каталог `crates/storage/migrations/`.
+
+## Observability
+
+- **Tracing**: `tracing` + `tracing-subscriber` с `EnvFilter` (`RUST_LOG`). Поддержка JSON-формата (`LOG_FORMAT=json`). gRPC-вызовы прокидывают request/correlation ID в tracing-span.
+- **Request ID**: `x-request-id` генерируется или принимается из запроса, добавляется в корневой span и заголовок ответа.
+- **Metrics**: Prometheus exporter на `/metrics`.
 
 ## Graceful Shutdown
 

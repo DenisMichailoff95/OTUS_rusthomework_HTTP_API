@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use domain::LinkRepository;
 use shorty_server::config::StorageType;
-use shorty_server::{AppState, Config, build_router, cleanup};
+use shorty_server::{AppState, Config, build_router, cleanup, grpc};
 use storage::{Cache, CacheConfig, InMemoryRepo, PostgresRepo, spawn_pool_metrics};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
@@ -105,7 +105,9 @@ async fn run() {
     init_tracing();
 
     let config = Arc::new(Config::from_env());
-    let addr = std::env::var("LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
+    let http_addr = std::env::var("LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
+    let grpc_addr =
+        std::env::var("GRPC_LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:50051".to_string());
 
     // Инициализация метрик
     let _metrics_handle = storage::telemetry::init_metrics();
@@ -116,12 +118,15 @@ async fn run() {
     let cache = create_cache(&config).await;
     let stats_storage = Arc::new(domain::stats::StatsStorage::new());
 
+    let auth_config = config.auth.clone().map(Arc::new);
+
     let state = AppState {
         repo: repo.clone(),
         stats_storage: stats_storage.clone(),
         config: config.clone(),
         cache: cache.clone(),
         metrics_handle: storage::telemetry::init_metrics(),
+        auth: auth_config.clone(),
     };
 
     // Запуск уборщика
@@ -129,22 +134,39 @@ async fn run() {
     let tracker = TaskTracker::new();
     cleanup::spawn_cleaner(repo, CLEANUP_PERIOD, &tracker, shutdown_token.clone());
 
-    // Запуск сервера
-    let listener = tokio::net::TcpListener::bind(&addr)
+    // Запуск HTTP сервера
+    let http_listener = tokio::net::TcpListener::bind(&http_addr)
         .await
-        .unwrap_or_else(|e| panic!("failed to bind {addr}: {e}"));
+        .unwrap_or_else(|e| panic!("failed to bind {http_addr}: {e}"));
 
-    tracing::info!(%addr, "shorty server listening");
+    tracing::info!(%http_addr, "HTTP server listening");
     tracing::info!(
         storage_type = ?config.storage_type,
         cache_enabled = config.is_cache_enabled(),
+        auth_enabled = auth_config.is_some(),
         "server configuration"
     );
 
-    axum::serve(listener, build_router(state))
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .expect("server error");
+    let grpc_state = state.clone();
+    let grpc_shutdown = shutdown_token.clone();
+    let grpc_task = tokio::spawn(async move {
+        let server = grpc::GrpcServer::new(grpc_state);
+        let addr = grpc_addr.parse().expect("invalid gRPC address");
+        server.serve(addr, grpc_shutdown).await;
+    });
+
+    let http_state = state.clone();
+    let http_task = tokio::spawn(async move {
+        axum::serve(http_listener, build_router(http_state))
+            .with_graceful_shutdown(shutdown_signal())
+            .await
+            .expect("server error");
+    });
+
+    tokio::select! {
+        _ = http_task => {},
+        _ = grpc_task => {},
+    };
 
     shutdown_token.cancel();
     tracker.close();

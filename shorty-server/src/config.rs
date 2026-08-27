@@ -2,6 +2,8 @@
 
 use std::time::Duration;
 
+use crate::auth::AuthConfig;
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub code_length: usize,
@@ -19,6 +21,7 @@ pub struct Config {
     pub cache_ttl_secs: u64,
     pub cache_jitter_secs: u64,
     pub cache_op_timeout_ms: u64,
+    pub auth: Option<AuthConfig>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,6 +46,7 @@ impl Default for Config {
             cache_ttl_secs: 60,
             cache_jitter_secs: 10,
             cache_op_timeout_ms: 300,
+            auth: Some(AuthConfig::default()),
         }
     }
 }
@@ -118,6 +122,41 @@ impl Config {
 
         if let Ok(val) = std::env::var("CACHE_OP_TIMEOUT_MS") {
             config.cache_op_timeout_ms = val.parse().expect("CACHE_OP_TIMEOUT_MS must be a number");
+        }
+
+        // Auth
+        if std::env::var("DISABLE_AUTH").is_ok() {
+            config.auth = None;
+        }
+
+        if let Ok(val) = std::env::var("AUTH_ISSUER")
+            && let Some(ref mut auth) = config.auth
+        {
+            auth.issuer = val;
+        }
+
+        if let Ok(val) = std::env::var("AUTH_AUDIENCE")
+            && let Some(ref mut auth) = config.auth
+        {
+            auth.audience = val;
+        }
+
+        if let Ok(val) = std::env::var("AUTH_TTL_SECS")
+            && let Some(ref mut auth) = config.auth
+        {
+            auth.access_token_ttl_secs = val.parse().expect("AUTH_TTL_SECS must be a number");
+        }
+
+        if let Ok(val) = std::env::var("AUTH_PRIVATE_KEY_PATH")
+            && let Some(ref mut auth) = config.auth
+        {
+            auth.private_key_path = val;
+        }
+
+        if let Ok(val) = std::env::var("AUTH_PUBLIC_KEY_PATH")
+            && let Some(ref mut auth) = config.auth
+        {
+            auth.public_key_path = val;
         }
 
         config

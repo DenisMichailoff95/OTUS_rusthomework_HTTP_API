@@ -51,6 +51,7 @@ async fn postgres_state() -> AppState {
         config,
         cache: Cache::disabled(),
         metrics_handle: init_metrics(),
+        auth: None,
     }
 }
 

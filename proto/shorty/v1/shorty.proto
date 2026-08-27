@@ -1,0 +1,84 @@
+syntax = "proto3";
+
+package shorty.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// Сервис сокращения ссылок
+service ShortyService {
+  // Получить ссылку по коду
+  rpc GetLink(GetLinkRequest) returns (GetLinkResponse);
+
+  // Создать новую ссылку
+  rpc CreateLink(CreateLinkRequest) returns (CreateLinkResponse);
+
+  // Получить список ссылок с cursor-пагинацией
+  rpc ListLinks(ListLinksRequest) returns (ListLinksResponse);
+
+  // Подписаться на изменения ссылок (server-streaming)
+  rpc StreamLinks(StreamLinksRequest) returns (stream LinkEvent);
+}
+
+// Запрос для получения ссылки по коду
+message GetLinkRequest {
+  string code = 1;
+}
+
+// Ответ с данными ссылки
+message GetLinkResponse {
+  string code = 1;
+  string target_url = 2;
+  google.protobuf.Timestamp created_at = 3;
+  google.protobuf.Timestamp updated_at = 4;
+  optional google.protobuf.Timestamp expires_at = 5;
+  int64 version = 6;
+  int64 hits = 7;
+}
+
+// Запрос на создание ссылки
+message CreateLinkRequest {
+  string target_url = 1;
+  optional string custom_code = 2;
+  optional int64 ttl_seconds = 3;
+}
+
+// Ответ после создания ссылки
+message CreateLinkResponse {
+  string code = 1;
+  string target_url = 2;
+  google.protobuf.Timestamp created_at = 3;
+  optional google.protobuf.Timestamp expires_at = 4;
+  int64 version = 5;
+}
+
+// Запрос на получение списка ссылок
+message ListLinksRequest {
+  int32 page_size = 1;
+  optional string page_token = 2;
+}
+
+// Ответ со списком ссылок
+message ListLinksResponse {
+  repeated GetLinkResponse links = 1;
+  optional string next_page_token = 2;
+}
+
+// Запрос на подписку на изменения
+message StreamLinksRequest {
+  int32 batch_size = 1;
+}
+
+// Событие изменения ссылки
+message LinkEvent {
+  LinkEventType event_type = 1;
+  GetLinkResponse link = 2;
+  google.protobuf.Timestamp occurred_at = 3;
+}
+
+// Тип события изменения ссылки
+enum LinkEventType {
+  LINK_EVENT_TYPE_UNSPECIFIED = 0;
+  LINK_EVENT_TYPE_CREATED = 1;
+  LINK_EVENT_TYPE_UPDATED = 2;
+  LINK_EVENT_TYPE_DELETED = 3;
+}

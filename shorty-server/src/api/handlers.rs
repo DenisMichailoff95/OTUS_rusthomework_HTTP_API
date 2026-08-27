@@ -11,13 +11,14 @@ use axum::{
 use domain::{RepoError, ShortLink};
 use serde::Serialize;
 use storage::link_key;
+use utoipa::ToSchema;
 
 use super::{
     dto::{
         CreateLinkRequest, LinkResponse, ListLinksResponse, UpdateLinkRequest, expires_at_from_ttl,
         parse_target_url, unix_secs, validate_custom_code,
     },
-    error::{AppError, AppJson},
+    error::{AppError, AppJson, ErrorBody},
 };
 use crate::AppState;
 
@@ -27,6 +28,21 @@ use base64::Engine;
 // CRUD операции со ссылками
 // ---------------------------------------------------------------------------
 
+/// Создать новую короткую ссылку.
+#[utoipa::path(
+    post,
+    path = "/api/v1/links",
+    tags = ["shorty"],
+    request_body = CreateLinkRequest,
+    responses(
+        (status = 201, description = "Ссылка создана", body = LinkResponse),
+        (status = 400, description = "Некорректный запрос", body = ErrorBody),
+        (status = 401, description = "Требуется аутентификация", body = ErrorBody),
+        (status = 409, description = "Код уже занят", body = ErrorBody),
+        (status = 503, description = "БД недоступна", body = ErrorBody),
+    ),
+    security(("bearerAuth" = []))
+)]
 pub async fn create_link(
     State(state): State<AppState>,
     AppJson(req): AppJson<CreateLinkRequest>,
@@ -51,7 +67,26 @@ pub async fn create_link(
     ))
 }
 
-/// Обновление ссылки с optimistic locking
+/// Обновить ссылку с optimistic locking.
+#[utoipa::path(
+    put,
+    path = "/api/v1/links/{code}",
+    tags = ["shorty"],
+    params(
+        ("code" = String, Path, description = "Код ссылки")
+    ),
+    request_body = UpdateLinkRequest,
+    responses(
+        (status = 200, description = "Ссылка обновлена", body = LinkResponse),
+        (status = 400, description = "Некорректный запрос", body = ErrorBody),
+        (status = 401, description = "Требуется аутентификация", body = ErrorBody),
+        (status = 403, description = "Доступ запрещён", body = ErrorBody),
+        (status = 404, description = "Ссылка не найдена", body = ErrorBody),
+        (status = 409, description = "Конфликт версий", body = ErrorBody),
+        (status = 503, description = "БД недоступна", body = ErrorBody),
+    ),
+    security(("bearerAuth" = []))
+)]
 pub async fn update_link(
     State(state): State<AppState>,
     Path(code): Path<String>,
@@ -75,7 +110,23 @@ pub async fn update_link(
     }))
 }
 
-/// Получение ссылки с кешированием (cache-aside)
+/// Получить ссылку по коду (с кешированием).
+#[utoipa::path(
+    get,
+    path = "/api/v1/links/{code}",
+    tags = ["shorty"],
+    params(
+        ("code" = String, Path, description = "Код ссылки")
+    ),
+    responses(
+        (status = 200, description = "Ссылка найдена", body = LinkResponse),
+        (status = 401, description = "Требуется аутентификация", body = ErrorBody),
+        (status = 403, description = "Доступ запрещён", body = ErrorBody),
+        (status = 404, description = "Ссылка не найдена", body = ErrorBody),
+        (status = 503, description = "БД недоступна", body = ErrorBody),
+    ),
+    security(("bearerAuth" = []))
+)]
 pub async fn get_link(
     State(state): State<AppState>,
     Path(code): Path<String>,
@@ -97,7 +148,23 @@ pub async fn get_link(
     Ok(Json(response))
 }
 
-/// Листинг ссылок с keyset пагинацией
+/// Получить список ссылок с keyset-пагинацией.
+#[utoipa::path(
+    get,
+    path = "/api/v1/links",
+    tags = ["shorty"],
+    params(
+        ("limit" = Option<u64>, Query, description = "Лимит страницы (макс 100)"),
+        ("cursor" = Option<String>, Query, description = "Курсор для пагинации")
+    ),
+    responses(
+        (status = 200, description = "Список ссылок", body = ListLinksResponse),
+        (status = 401, description = "Требуется аутентификация", body = ErrorBody),
+        (status = 403, description = "Доступ запрещён", body = ErrorBody),
+        (status = 503, description = "БД недоступна", body = ErrorBody),
+    ),
+    security(("bearerAuth" = []))
+)]
 pub async fn list_links(
     State(state): State<AppState>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
@@ -135,7 +202,20 @@ pub async fn list_links(
     Ok(Json(response))
 }
 
-/// Редирект с инкрементом счетчика
+/// Редирект по короткому коду (публичный).
+#[utoipa::path(
+    get,
+    path = "/{code}",
+    tags = ["shorty"],
+    params(
+        ("code" = String, Path, description = "Код ссылки")
+    ),
+    responses(
+        (status = 302, description = "Редирект на целевой URL"),
+        (status = 404, description = "Ссылка не найдена", body = ErrorBody),
+        (status = 503, description = "БД недоступна", body = ErrorBody),
+    )
+)]
 pub async fn redirect(
     State(state): State<AppState>,
     Path(code): Path<String>,
@@ -155,7 +235,23 @@ pub async fn redirect(
     ))
 }
 
-/// Удаление ссылки с инвалидацией кеша
+/// Удалить ссылку.
+#[utoipa::path(
+    delete,
+    path = "/api/v1/links/{code}",
+    tags = ["shorty"],
+    params(
+        ("code" = String, Path, description = "Код ссылки")
+    ),
+    responses(
+        (status = 204, description = "Ссылка удалена"),
+        (status = 401, description = "Требуется аутентификация", body = ErrorBody),
+        (status = 403, description = "Доступ запрещён", body = ErrorBody),
+        (status = 404, description = "Ссылка не найдена", body = ErrorBody),
+        (status = 503, description = "БД недоступна", body = ErrorBody),
+    ),
+    security(("bearerAuth" = []))
+)]
 pub async fn delete_link(
     State(state): State<AppState>,
     Path(code): Path<String>,
@@ -224,20 +320,38 @@ async fn try_insert_link(
 // Технические эндпоинты
 // ---------------------------------------------------------------------------
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct Health {
-    status: &'static str,
+    pub status: &'static str,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct Version {
-    version: &'static str,
+    pub version: &'static str,
 }
 
+/// Health check эндпоинт (публичный).
+#[utoipa::path(
+    get,
+    path = "/healthz",
+    tags = ["health"],
+    responses(
+        (status = 200, description = "Сервис жив", body = Health)
+    )
+)]
 pub async fn healthz() -> Json<Health> {
     Json(Health { status: "ok" })
 }
 
+/// Версия сервиса (публичный).
+#[utoipa::path(
+    get,
+    path = "/version",
+    tags = ["health"],
+    responses(
+        (status = 200, description = "Версия сервиса", body = Version)
+    )
+)]
 pub async fn version() -> Json<Version> {
     Json(Version {
         version: env!("CARGO_PKG_VERSION"),

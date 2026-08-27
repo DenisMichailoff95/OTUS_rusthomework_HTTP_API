@@ -1,8 +1,4 @@
 //! Единый слой ошибок API.
-//!
-//! Все ошибки в сервисе преобразуются в этот тип и возвращаются
-//! в едином JSON формате. Это обеспечивает консистентность API
-//! и упрощает обработку ошибок на клиенте.
 
 use axum::{
     Json,
@@ -11,14 +7,25 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 use crate::request_id::current_request_id;
 
+/// Стандартное тело ошибки для всех ответов.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ErrorBody {
+    /// Машиночитаемый код ошибки
+    #[schema(example = "not_found")]
+    pub code: String,
+    /// Человекочитаемое сообщение об ошибке
+    #[schema(example = "resource not found")]
+    pub message: String,
+    /// Идентификатор запроса для трассировки в логах
+    #[schema(example = "550e8400-e29b-41d4-a716-446655440000")]
+    pub request_id: Option<String>,
+}
+
 /// Ошибка уровня приложения.
-///
-/// Каждый вариант ошибки маппится на HTTP статус и JSON-тело.
-/// Внутренние детали ошибок (например, паники) никогда не утекают
-/// наружу в ответе, только в логи.
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
     #[error("resource not found")]
@@ -36,39 +43,18 @@ pub enum AppError {
     #[error("{0}")]
     Validation(String),
 
-    /// Отказ extractor'а (битый JSON, лишние поля) → статус из rejection.
     #[error("{message}")]
     InvalidBody { status: StatusCode, message: String },
 
-    /// Превышен rate limit → 429 с заголовком Retry-After.
     #[error("rate limit exceeded, retry after {retry_after} seconds")]
     RateLimitExceeded { retry_after: u64 },
 
-    /// Внутренняя ошибка → 500.
-    /// Детали уходят только в лог, клиенту возвращается общее сообщение.
     #[error("internal error")]
     Internal(#[from] anyhow::Error),
 }
 
-/// Стандартное тело ошибки для всех ответов.
-///
-/// Все ошибки возвращаются в этом формате, что делает API предсказуемым
-/// и упрощает обработку ошибок на клиенте.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ErrorBody {
-    /// Машиночитаемый код ошибки (например, "not_found", "rate_limit_exceeded")
-    pub code: String,
-    /// Человекочитаемое сообщение об ошибке
-    pub message: String,
-    /// Идентификатор запроса для трассировки в логах
-    pub request_id: Option<String>,
-}
-
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        // Получаем request_id из task-local хранилища
-        // Это позволяет нам добавлять id в тело ошибки без явной передачи
-        // через все handlers
         let request_id = current_request_id();
 
         let (status, code) = match &self {
@@ -86,7 +72,6 @@ impl IntoResponse for AppError {
                     _ => "bad_request",
                 },
             ),
-            // Для rate limit добавляем заголовок Retry-After
             AppError::RateLimitExceeded { retry_after } => {
                 return (
                     StatusCode::TOO_MANY_REQUESTS,
@@ -99,8 +84,6 @@ impl IntoResponse for AppError {
                 )
                     .into_response();
             }
-            // Внутренние ошибки логируем с полным стеком, но клиенту
-            // отдаем только общее сообщение
             AppError::Internal(err) => {
                 tracing::error!(error = ?err, request_id = ?request_id, "internal error");
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal")
@@ -116,7 +99,6 @@ impl IntoResponse for AppError {
     }
 }
 
-/// Преобразование ошибок репозитория в ошибки API.
 impl From<domain::RepoError> for AppError {
     fn from(err: domain::RepoError) -> Self {
         match err {
@@ -129,9 +111,6 @@ impl From<domain::RepoError> for AppError {
     }
 }
 
-/// Обёртка для JSON с кастомной ошибкой.
-///
-/// Позволяет преобразовывать ошибки десериализации axum в наш формат.
 pub struct AppJson<T>(pub T);
 
 impl<S, T> FromRequest<S> for AppJson<T>
