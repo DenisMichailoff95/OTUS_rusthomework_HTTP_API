@@ -36,3 +36,18 @@ metrics = "0.24.6"
 metrics-exporter-prometheus = "0.18.3"
 rand = "0.10.2"
 base64 = "0.22"
+
+# gRPC, OpenAPI, JWT
+tonic = { version = "0.13.1", features = ["transport"] }
+prost = "0.13.5"
+prost-types = "0.13.5"
+tonic-reflection = { version = "0.13.1", features = ["server"] }
+tonic-health = "0.13.1"
+utoipa = { version = "5.3.1", features = ["axum_extras", "macros"] }
+utoipa-swagger-ui = { version = "9.0.0", features = ["axum"] }
+jsonwebtoken = "9.0.0"
+argon2 = "0.5.3"
+rsa = "0.9.8"
+pem = "3.0.5"
+sha2 = "0.10.9"
+tokio-stream = "0.1.17"

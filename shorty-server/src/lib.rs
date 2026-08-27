@@ -1,8 +1,12 @@
 //! Сервис коротких ссылок `shorty`.
 
+#![allow(clippy::result_large_err)]
+
 pub mod api;
+pub mod auth;
 pub mod cleanup;
 pub mod config;
+pub mod grpc;
 pub mod request_id;
 
 use std::sync::Arc;
@@ -22,10 +26,19 @@ use tower_http::{
     timeout::TimeoutLayer,
     trace::TraceLayer,
 };
+use utoipa::{Modify, OpenApi};
+use utoipa_swagger_ui::SwaggerUi;
 
 pub use config::Config;
 
-use crate::api::rate_limit::{RateLimitState, rate_limit_middleware};
+use crate::api::error::ErrorBody;
+use crate::api::handlers::{
+    create_link, delete_link, fallback_404, get_link, healthz, list_links, redirect, slow,
+    slow_blocking, update_link, version,
+};
+use crate::api::rate_limit::RateLimitState;
+use crate::api::stats::{get_link_stats, get_top_stats};
+use crate::auth::{AuthConfig, auth_middleware, login_handler};
 
 /// Состояние приложения.
 #[derive(Clone)]
@@ -35,11 +48,67 @@ pub struct AppState {
     pub config: Arc<Config>,
     pub cache: Cache,
     pub metrics_handle: PrometheusHandle,
+    pub auth: Option<Arc<AuthConfig>>,
+}
+
+/// OpenAPI спецификация
+#[derive(OpenApi)]
+#[openapi(
+    info(
+        title = "Shorty API",
+        version = "1.0.0",
+        description = "Сервис сокращения ссылок с JWT-аутентификацией"
+    ),
+    components(
+        schemas(
+            ErrorBody,
+            crate::api::dto::LinkResponse,
+            crate::api::dto::CreateLinkRequest,
+            crate::api::dto::UpdateLinkRequest,
+            crate::api::dto::ListLinksResponse,
+            crate::api::stats::LinkStatsResponse,
+            crate::api::stats::TopStatsResponse,
+            crate::api::stats::TopLink,
+            crate::auth::LoginRequest,
+            crate::auth::LoginResponse,
+            crate::api::handlers::Health,
+            crate::api::handlers::Version,
+        )
+    ),
+    tags(
+        (name = "shorty", description = "Операции с короткими ссылками"),
+        (name = "auth", description = "Аутентификация"),
+        (name = "health", description = "Health check")
+    ),
+    security(
+        ("bearerAuth" = [])
+    ),
+    modifiers(&BearerAuthAddon)
+)]
+pub struct ApiDoc;
+
+struct BearerAuthAddon;
+
+impl Modify for BearerAuthAddon {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        openapi.components = Some(
+            utoipa::openapi::schema::ComponentsBuilder::new()
+                .security_scheme(
+                    "bearerAuth",
+                    utoipa::openapi::security::SecurityScheme::Http(
+                        utoipa::openapi::security::HttpBuilder::new()
+                            .scheme(utoipa::openapi::security::HttpAuthScheme::Bearer)
+                            .build(),
+                    ),
+                )
+                .build(),
+        );
+    }
 }
 
 /// Сборка приложения.
 pub fn build_router(state: AppState) -> Router {
-    let rate_limit_state = RateLimitState::new(
+    let _rate_limit_state = RateLimitState::new(
         state.config.rate_limit_capacity,
         state.config.rate_limit_period_secs,
         state.config.rate_limit_cleanup_ttl_secs,
@@ -47,29 +116,34 @@ pub fn build_router(state: AppState) -> Router {
 
     let metrics_handle = state.metrics_handle.clone();
 
-    // API v1 routes с rate limiting
-    let api_v1 = Router::new()
-        .route("/links", post(api::handlers::create_link))
+    // Публичные routes (не требуют аутентификации)
+    let public_routes = Router::new()
+        .route("/healthz", get(healthz))
+        .route("/version", get(version))
+        .route("/auth/login", post(login_handler))
+        .route("/{code}", get(redirect))
+        .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()));
+
+    // Защищённые API routes (требуют JWT)
+    let protected_routes = Router::new()
+        .route("/links", post(create_link).get(list_links))
         .route(
             "/links/{code}",
-            get(api::handlers::get_link)
-                .put(api::handlers::update_link)
-                .delete(api::handlers::delete_link),
+            get(get_link).put(update_link).delete(delete_link),
         )
-        .route("/links/{code}/stats", get(api::stats::get_link_stats))
-        .route("/links", get(api::handlers::list_links))
+        .route("/links/{code}/stats", get(get_link_stats))
+        .route("/stats/top", get(get_top_stats))
         .layer(axum::middleware::from_fn_with_state(
-            rate_limit_state.clone(),
-            rate_limit_middleware,
+            state.clone(),
+            auth_middleware,
         ));
 
     // Основной роутер
     Router::new()
-        .route("/healthz", get(api::handlers::healthz))
-        .route("/version", get(api::handlers::version))
-        .route("/slow", get(api::handlers::slow))
-        .route("/slow-blocking", get(api::handlers::slow_blocking))
-        .route("/stats/top", get(api::stats::get_top_stats))
+        .merge(public_routes)
+        .nest("/api/v1", protected_routes)
+        .route("/slow", get(slow))
+        .route("/slow-blocking", get(slow_blocking))
         .route(
             "/metrics",
             get(move || async move {
@@ -83,9 +157,7 @@ pub fn build_router(state: AppState) -> Router {
                 )
             }),
         )
-        .nest("/api/v1", api_v1)
-        .route("/{code}", get(api::handlers::redirect))
-        .fallback(api::handlers::fallback_404)
+        .fallback(fallback_404)
         .layer(
             ServiceBuilder::new()
                 .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
