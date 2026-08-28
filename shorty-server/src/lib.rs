@@ -18,7 +18,9 @@ use axum::{
 };
 use domain::LinkRepository;
 use metrics_exporter_prometheus::PrometheusHandle;
+use sqlx::PgPool;
 use storage::Cache;
+use tokio_util::sync::CancellationToken;
 use tower::ServiceBuilder;
 use tower_http::{
     limit::RequestBodyLimitLayer,
@@ -33,7 +35,7 @@ pub use config::Config;
 
 use crate::api::error::ErrorBody;
 use crate::api::handlers::{
-    create_link, delete_link, fallback_404, get_link, healthz, list_links, redirect, slow,
+    create_link, delete_link, fallback_404, get_link, healthz, list_links, readyz, redirect, slow,
     slow_blocking, update_link, version,
 };
 use crate::api::rate_limit::RateLimitState;
@@ -49,6 +51,8 @@ pub struct AppState {
     pub cache: Cache,
     pub metrics_handle: PrometheusHandle,
     pub auth: Option<Arc<AuthConfig>>,
+    pub shutdown_token: CancellationToken,
+    pub db_pool: Option<PgPool>,
 }
 
 /// OpenAPI спецификация
@@ -119,6 +123,7 @@ pub fn build_router(state: AppState) -> Router {
     // Публичные routes (не требуют аутентификации)
     let public_routes = Router::new()
         .route("/healthz", get(healthz))
+        .route("/readyz", get(readyz))
         .route("/version", get(version))
         .route("/auth/login", post(login_handler))
         .route("/{code}", get(redirect))
