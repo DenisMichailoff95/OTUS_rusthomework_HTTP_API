@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE links \n            SET hits = hits + 1 \n            WHERE code = $1 \n            RETURNING hits\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "hits",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "c3138febac14af0ad12beb81a655ad6660f845a962923aadc18ca58c17de7fb1"
+}

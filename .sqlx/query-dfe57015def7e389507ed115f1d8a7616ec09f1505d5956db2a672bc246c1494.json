@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO links (code, target_url, expires_at, created_at, updated_at)\n            VALUES ($1, $2, $3, now(), now())\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "dfe57015def7e389507ed115f1d8a7616ec09f1505d5956db2a672bc246c1494"
+}
