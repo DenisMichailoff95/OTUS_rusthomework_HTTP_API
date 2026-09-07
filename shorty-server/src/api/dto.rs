@@ -6,45 +6,68 @@ use domain::LinkStats;
 use domain::ShortLink;
 use serde::{Deserialize, Serialize};
 use url::Url;
+use utoipa::ToSchema;
 
 use super::error::AppError;
 
 /// Тело `POST /api/v1/links`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct CreateLinkRequest {
+    /// Целевой URL
+    #[schema(example = "https://example.com")]
     pub target_url: String,
-    #[serde(default)]
+    /// Кастомный код (опционально, 4-32 символа, только [a-zA-Z0-9_-])
+    #[schema(example = "promo2026")]
     pub custom_code: Option<String>,
-    #[serde(default)]
+    /// TTL в секундах (опционально, минимум 60)
+    #[schema(example = 3600)]
     pub ttl_seconds: Option<u64>,
 }
 
 /// Тело `PUT /api/v1/links/{code}`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct UpdateLinkRequest {
+    /// Новый целевой URL
+    #[schema(example = "https://example.com/updated")]
     pub target_url: String,
+    /// Версия для optimistic locking
+    #[schema(example = 1)]
     pub version: i64,
 }
 
 /// Представление ссылки в ответах API.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema, Clone)]
 #[serde(rename_all = "snake_case")]
 pub struct LinkResponse {
+    /// Короткий код
+    #[schema(example = "abc123")]
     pub code: String,
+    /// Целевой URL
+    #[schema(example = "https://example.com")]
     pub target_url: String,
+    /// Время создания (Unix timestamp)
+    #[schema(example = 1700000000)]
     pub created_at_unix: u64,
+    /// Время истечения (Unix timestamp, опционально)
+    #[schema(example = 1700003600)]
     pub expires_at_unix: Option<u64>,
+    /// Количество переходов
+    #[schema(example = 42)]
     pub hits: u64,
+    /// Версия для optimistic locking
+    #[schema(example = 1)]
     pub version: i64,
 }
 
 /// Ответ со списком ссылок.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct ListLinksResponse {
+    /// Список ссылок
     pub links: Vec<LinkResponse>,
+    /// Курсор для следующей страницы
     pub next_cursor: Option<String>,
 }
 
