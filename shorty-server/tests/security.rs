@@ -17,6 +17,7 @@ use shorty_server::{
     build_router,
 };
 use storage::{Cache, InMemoryRepo, telemetry::init_metrics};
+use tokio_util::sync::CancellationToken;
 
 fn test_state() -> (AppState, Arc<InMemoryRepo>) {
     let repo = Arc::new(InMemoryRepo::new());
@@ -25,8 +26,8 @@ fn test_state() -> (AppState, Arc<InMemoryRepo>) {
     config.rate_limit_capacity = 10000;
     config.rate_limit_period_secs = 60;
 
-    // Включаем аутентификацию для тестов
     let auth_config = AuthConfig::default();
+    let shutdown_token = CancellationToken::new();
 
     let state = AppState {
         repo: repo.clone(),
@@ -35,6 +36,8 @@ fn test_state() -> (AppState, Arc<InMemoryRepo>) {
         cache: Cache::disabled(),
         metrics_handle: init_metrics(),
         auth: Some(Arc::new(auth_config)),
+        shutdown_token,
+        db_pool: None,
     };
 
     (state, repo)

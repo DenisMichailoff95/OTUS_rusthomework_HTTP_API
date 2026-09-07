@@ -9,6 +9,7 @@ use url::Url;
 use utoipa::ToSchema;
 
 use super::error::AppError;
+use crate::api::error::FieldError;
 
 /// Тело `POST /api/v1/links`.
 #[derive(Debug, Deserialize, ToSchema)]
@@ -103,13 +104,21 @@ pub fn unix_secs(t: SystemTime) -> u64 {
 
 /// «Parse, don't validate»: не проверяем строку, а превращаем её в `Url`.
 pub fn parse_target_url(raw: &str) -> Result<Url, AppError> {
-    let url =
-        Url::parse(raw).map_err(|e| AppError::Validation(format!("invalid target_url: {e}")))?;
+    let url = Url::parse(raw).map_err(|e| AppError::Validation {
+        message: format!("invalid target_url: {e}"),
+        details: vec![FieldError {
+            field: "target_url".to_string(),
+            issue: format!("invalid url: {e}"),
+        }],
+    })?;
     if !matches!(url.scheme(), "http" | "https") {
-        return Err(AppError::Validation(format!(
-            "target_url must use http or https, got '{}'",
-            url.scheme()
-        )));
+        return Err(AppError::Validation {
+            message: format!("target_url must use http or https, got '{}'", url.scheme()),
+            details: vec![FieldError {
+                field: "target_url".to_string(),
+                issue: format!("scheme must be http or https, got '{}'", url.scheme()),
+            }],
+        });
     }
     Ok(url)
 }
@@ -117,17 +126,25 @@ pub fn parse_target_url(raw: &str) -> Result<Url, AppError> {
 /// Правила `custom_code`: 4..=32 символа из `[a-zA-Z0-9_-]`.
 pub fn validate_custom_code(code: &str) -> Result<(), AppError> {
     if !(4..=32).contains(&code.len()) {
-        return Err(AppError::Validation(
-            "custom_code must be 4..=32 characters long".to_string(),
-        ));
+        return Err(AppError::Validation {
+            message: "custom_code must be 4..=32 characters long".to_string(),
+            details: vec![FieldError {
+                field: "custom_code".to_string(),
+                issue: format!("length is {} characters, expected 4..=32", code.len()),
+            }],
+        });
     }
     if !code
         .bytes()
         .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
     {
-        return Err(AppError::Validation(
-            "custom_code may contain only [a-zA-Z0-9_-]".to_string(),
-        ));
+        return Err(AppError::Validation {
+            message: "custom_code may contain only [a-zA-Z0-9_-]".to_string(),
+            details: vec![FieldError {
+                field: "custom_code".to_string(),
+                issue: "contains invalid characters".to_string(),
+            }],
+        });
     }
     Ok(())
 }
@@ -137,12 +154,20 @@ pub fn validate_custom_code(code: &str) -> Result<(), AppError> {
 pub fn expires_at_from_ttl(ttl_seconds: Option<u64>) -> Result<Option<SystemTime>, AppError> {
     match ttl_seconds {
         None => Ok(None),
-        Some(0) => Err(AppError::Validation(
-            "ttl_seconds must be greater than zero".to_string(),
-        )),
-        Some(secs) if secs < 60 => Err(AppError::Validation(
-            "ttl_seconds must be at least 60 seconds".to_string(),
-        )),
+        Some(0) => Err(AppError::Validation {
+            message: "ttl_seconds must be greater than zero".to_string(),
+            details: vec![FieldError {
+                field: "ttl_seconds".to_string(),
+                issue: "must be greater than zero".to_string(),
+            }],
+        }),
+        Some(secs) if secs < 60 => Err(AppError::Validation {
+            message: "ttl_seconds must be at least 60 seconds".to_string(),
+            details: vec![FieldError {
+                field: "ttl_seconds".to_string(),
+                issue: format!("value is {} seconds, minimum is 60", secs),
+            }],
+        }),
         Some(secs) => Ok(Some(SystemTime::now() + Duration::from_secs(secs))),
     }
 }

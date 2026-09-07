@@ -18,6 +18,7 @@ use shorty_server::{
     build_router,
 };
 use storage::{Cache, PostgresRepo, telemetry::init_metrics};
+use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 
 async fn postgres_state() -> AppState {
@@ -41,7 +42,7 @@ async fn postgres_state() -> AppState {
         .await
         .expect("failed to truncate links");
 
-    let repo = Arc::new(PostgresRepo::new(pool));
+    let repo = Arc::new(PostgresRepo::new(pool.clone()));
     let stats_storage = Arc::new(domain::stats::StatsStorage::new());
     let config = Arc::new(Config::default());
 
@@ -52,6 +53,8 @@ async fn postgres_state() -> AppState {
         cache: Cache::disabled(),
         metrics_handle: init_metrics(),
         auth: None,
+        shutdown_token: CancellationToken::new(),
+        db_pool: Some(pool),
     }
 }
 

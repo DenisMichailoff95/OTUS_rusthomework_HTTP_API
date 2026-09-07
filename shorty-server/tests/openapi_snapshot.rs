@@ -11,6 +11,7 @@ use tower::ServiceExt;
 
 use shorty_server::{AppState, Config, build_router};
 use storage::{Cache, InMemoryRepo, telemetry::init_metrics};
+use tokio_util::sync::CancellationToken;
 
 fn test_app() -> Router {
     let repo = Arc::new(InMemoryRepo::new());
@@ -24,6 +25,8 @@ fn test_app() -> Router {
         cache: Cache::disabled(),
         metrics_handle: init_metrics(),
         auth: None,
+        shutdown_token: CancellationToken::new(),
+        db_pool: None,
     };
 
     build_router(state)

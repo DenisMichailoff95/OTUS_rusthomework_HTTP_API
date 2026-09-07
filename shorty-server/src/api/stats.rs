@@ -138,6 +138,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_stats_endpoints() {
+        use tokio_util::sync::CancellationToken;
         let repo = Arc::new(InMemoryRepo::new());
         let stats_storage = Arc::new(domain::stats::StatsStorage::new());
         let state = AppState {
@@ -147,6 +148,8 @@ mod tests {
             cache: Cache::disabled(),
             metrics_handle: storage::telemetry::init_metrics(),
             auth: None,
+            shutdown_token: CancellationToken::new(),
+            db_pool: None,
         };
 
         // Используем асинхронный метод

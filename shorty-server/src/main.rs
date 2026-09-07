@@ -119,6 +119,20 @@ async fn run() {
     let stats_storage = Arc::new(domain::stats::StatsStorage::new());
 
     let auth_config = config.auth.clone().map(Arc::new);
+    let db_pool = match config.storage_type {
+        StorageType::Postgres => {
+            let pool = sqlx::postgres::PgPoolOptions::new()
+                .max_connections(10)
+                .acquire_timeout(std::time::Duration::from_secs(3))
+                .connect(&config.database_url)
+                .await
+                .expect("failed to connect to PostgreSQL");
+            Some(pool)
+        }
+        _ => None,
+    };
+
+    let shutdown_token = CancellationToken::new();
 
     let state = AppState {
         repo: repo.clone(),
@@ -127,10 +141,11 @@ async fn run() {
         cache: cache.clone(),
         metrics_handle: storage::telemetry::init_metrics(),
         auth: auth_config.clone(),
+        shutdown_token: shutdown_token.clone(),
+        db_pool,
     };
 
     // Запуск уборщика
-    let shutdown_token = CancellationToken::new();
     let tracker = TaskTracker::new();
     cleanup::spawn_cleaner(repo, CLEANUP_PERIOD, &tracker, shutdown_token.clone());
 
@@ -158,7 +173,10 @@ async fn run() {
     let http_state = state.clone();
     let http_task = tokio::spawn(async move {
         axum::serve(http_listener, build_router(http_state))
-            .with_graceful_shutdown(shutdown_signal())
+            .with_graceful_shutdown(async move {
+                shutdown_signal().await;
+                shutdown_token.cancel();
+            })
             .await
             .expect("server error");
     });
@@ -168,7 +186,6 @@ async fn run() {
         _ = grpc_task => {},
     };
 
-    shutdown_token.cancel();
     tracker.close();
     match tokio::time::timeout(SHUTDOWN_TIMEOUT, tracker.wait()).await {
         Ok(()) => tracing::info!("all background tasks finished, bye"),

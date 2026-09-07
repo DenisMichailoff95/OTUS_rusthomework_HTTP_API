@@ -15,6 +15,7 @@ use shorty_server::{
     build_router,
 };
 use storage::{Cache, InMemoryRepo};
+use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 
 fn test_state() -> (AppState, Arc<InMemoryRepo>) {
@@ -31,6 +32,8 @@ fn test_state() -> (AppState, Arc<InMemoryRepo>) {
         cache: Cache::disabled(),
         metrics_handle: storage::telemetry::init_metrics(),
         auth: None,
+        shutdown_token: CancellationToken::new(),
+        db_pool: None,
     };
     (state, repo)
 }
